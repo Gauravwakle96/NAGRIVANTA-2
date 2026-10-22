@@ -1,44 +1,47 @@
-# Nagrivanta — Round 2 submission notes
+# Nagrivanta — Round 2 project update
 
 ## Project summary
 
-Nagrivanta is a civic issue workflow prototype that connects citizen reports to a municipal work order, field-repair evidence and a separate inspector decision. It addresses fragmented tickets, opaque prioritisation and unverified closure with one traceable end-to-end journey.
+Nagrivanta is a synthetic-data civic workflow prototype connecting citizen reports to a suggested municipal department, assigned work, field evidence and a separate human inspection decision.
 
-## Working project
+## Working project and source
 
-Run with `python server.py`, or deploy the Python app and provide the public URL here: **[add deployed project URL]**.
+- Working demo: https://nagrivanta-round2.onrender.com/
+- Source repository: https://github.com/Gauravwakle96/NAGRIVANTA-2
 
-## Source repository
+The published URL and repository should be rechecked after the updated source is deployed. The source changes in this package are not automatically published to GitHub or Render.
 
-**[add Git repository URL]**
+## Completed features in the current code
 
-## Completed features
+1. Citizen report form with description, location and evidence, generating a unique issue ID.
+2. Database-seeded multi-department categories and subcategories, including roads, heritage, water/drainage, waste, gardens/environment, electrical, health, encroachment, fire/disaster and public facilities.
+3. Configured department suggestions and a keyword-based triage fallback, labelled rule-based and requiring human review.
+4. Duplicate grouping preserves original source reports and evidence.
+5. Municipal assignment, crew repair evidence and a separate inspector decision.
+6. Heritage Watch list and a heritage-specific review checklist; no legal status or damage is automatically asserted.
+7. Additive schema migration preserves existing report IDs and history.
 
-1. Citizen submits an issue with category, area, precise location, description and initial photo; the app returns a trackable ID.
-2. Similar reports in the same location/category are linked to a master issue while preserving each original report and evidence.
-3. Municipal view explains completeness and priority factors before a human assigns department and crew.
-4. Field crew submits repair note and after-photo evidence.
-5. Inspector completes a five-check review and records either verified closure or rework.
-6. Citizen tracks status and full event timeline; synthetic dataset can be restored for a repeatable demo.
+## Technology
 
-## Technology and implementation
+- HTML, CSS and vanilla JavaScript.
+- Python standard-library HTTP/JSON API.
+- SQLite (`sqlite3`) with additive migration for department/category/routing configuration.
+- Rule-based classification, priority and duplicate recommendations; no trained AI claim.
 
-- HTML/CSS/vanilla JavaScript frontend.
-- Python standard-library JSON REST API.
-- SQLite persistence via `sqlite3`.
-- Explainable rules for completeness, priority and duplicate matching; no trained model or external integration is claimed.
-- Synthetic demo records and images only.
+## Round 1 plan changes
 
-## Changes from Round 1
-
-Round 1 proposed React/TypeScript/Vite and FastAPI/Pydantic/SQLAlchemy. For a reproducible, dependency-light event MVP, the implementation uses browser-native HTML/CSS/JavaScript and Python's standard HTTP/SQLite libraries. This preserves a working end-to-end workflow and transparent logic while reducing setup risk. The demo roles are not real authentication; production security and live municipal integration are not claimed. The proposed trust signal is shown as evidence completeness—not a judgement about the reporter or truth of a claim.
+The original plan named React/TypeScript/Vite and FastAPI/Pydantic/SQLAlchemy. The existing dependency-light UI and Python standard-library API were retained. The multi-department catalog and rule-based route suggestions extend the workflow without claiming a live municipal integration.
 
 ## Three substantial Round 3 improvements
 
-1. **Production-grade identity and role permissions:** add authenticated citizen, officer, crew and inspector accounts; enforce server-side authorization, secure image handling and audit access controls.
-2. **Geospatial duplicate detection and field operations:** add a map-backed location workflow with PostGIS, distance-aware matching, ward boundaries and a reviewable merge/split process that preserves source reports.
-3. **Tested reliability and multilingual access:** add automated end-to-end testing, accessibility review, resilient uploads/offline draft support and a multilingual citizen reporting flow, then publish measured test results.
+1. Secure identity, server-side role permissions, privacy controls and safe evidence storage.
+2. Authorized geospatial data integration, ward-aware matching and a provenance-backed Heritage Watch map.
+3. End-to-end reliability, accessibility, multilingual reporting, offline/resilient uploads and measured evaluation.
 
-## Limitations / demo disclosure
+## Limitations / disclosure
 
-This is a prototype using synthetic data. Score weights and match thresholds are illustrative heuristics, not validated accuracy. It is not connected to a municipality, production map, SMS service, identity provider or trained AI model. Do not submit real citizen or sensitive data.
+This is a prototype using synthetic records. The four role views remain demo navigation tabs and are **not authentication or access control**. The API is not suitable for real citizen data. Department assignments and priorities are illustrative, not verified PMC commitments. No municipal API, official heritage registry, map provider, live identity system or trained AI model is integrated. Render/SQLite persistence must be verified before claiming durable storage. Do not submit real personal or sensitive information.
+
+## Verification
+
+After this code update, run `python -m unittest discover -s tests -v` and `node --check public/app.js`. Report only the test results actually observed for the final version.

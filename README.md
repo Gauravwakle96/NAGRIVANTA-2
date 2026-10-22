@@ -1,68 +1,74 @@
-# Nagrivanta — Round 2 MVP
+# Nagrivanta — Multi-department civic workflow demo
 
-A judge-ready, synthetic-data prototype for the core civic issue → assignment → repair evidence → human inspection loop.
+Nagrivanta is a synthetic-data prototype for a civic report → triage recommendation → department assignment → field evidence → human inspection workflow. It now includes a database-seeded multi-department issue catalog and a Heritage Watch list. It is **not connected to PMC or another municipal system** and is not ready for real citizen records.
 
 ## Run locally
 
-Requirements: Python 3.10+ (the app uses only the Python standard library).
+Requirements: Python 3.10+; runtime uses only the standard library.
 
 ```bash
 python server.py
 ```
 
-Open <http://localhost:8000>. The app creates `nagrivanta.sqlite3` and seeds four synthetic issues on first run. It has no login, third-party API, or external service dependency. Use **Reset demo data** to restore the sample dataset.
+Open <http://localhost:8000>. SQLite is created at `nagrivanta.sqlite3`; on first run, four synthetic demo reports and the catalog are seeded. Set a different database path with `DATABASE_PATH=/path/to/nagrivanta.sqlite3`.
 
-To change the port/database path:
+To expose the reset button for a disposable synthetic demo only:
 
 ```bash
-PORT=8080 DATABASE_PATH=/path/to/nagrivanta.sqlite3 python server.py
+NAGRIVANTA_DEMO_RESET=1 python server.py
 ```
+
+Reset is disabled by default so a public deployment cannot delete added records through the demo control.
 
 ## Judge walkthrough
 
-1. Open **Citizen**. Select **Use synthetic sample evidence instead**, complete the report fields, and submit. Save the generated `NG-…` issue ID.
-2. Open **Municipal**. Review the priority breakdown and completeness signals, then assign a department and crew.
-3. Open **Field crew**. Add a repair note, use synthetic after-evidence, and submit the repair for inspection.
-4. Open **Inspector**. Complete all five checks and add an inspection note to verify closure. Or return it for rework to see that alternate path.
-5. Return to **Citizen** and track the issue by ID. Use an existing duplicate sample (NG-DEMO-101/102) to see source-report preservation and duplicate linkage.
+1. Open **Citizen**, choose a department area and subcategory, and use the sample evidence button.
+2. Try **Suggest category (rule-based demo)** with a description such as “Garbage is overflowing from a public bin.” Review the suggestion; it is not an AI model or an official decision.
+3. Submit the report. Its recommended department is derived from the configured catalog; an operator can choose another active department during assignment.
+4. Use **Municipal**, **Field crew**, and **Inspector** to complete the assignment, repair-evidence and human-inspection stages.
+5. Use **Heritage watch** to review reported heritage-category cases. It is a list only; no official heritage register or map is connected.
+6. Use existing synthetic duplicate samples `NG-DEMO-101` and `NG-DEMO-102` to see linked reports remain separate records.
 
-The seeded `NG-DEMO-104` is already awaiting inspection, so judges can explore the inspector workflow immediately.
+The demo role switcher is for walkthroughs only; it is **not authentication or access control**. Do not expose real personal or municipal data through this build.
 
-## Completed features
+## Implemented in this upgrade
 
-- Citizen report form: title, category, ward, specific location, description and image evidence; image resized client-side.
-- Unique issue IDs and citizen-visible status timeline.
-- SQLite-backed REST endpoints and validated state transitions.
-- Rule-based report-completeness signal with explicit factors; deliberately not a truthfulness/person score.
-- Explainable rule-based priority recommendation with category, safety-keyword, corroboration, evidence and baseline factors.
-- Duplicate grouping by category, area/location and text overlap; original source reports and evidence remain separate.
-- Municipal assignment and crew work-order queue.
-- Before/after evidence capture, five-point inspection and explicit human verified/rework decision.
-- Synthetic seed cases, reset control, responsive interface, error/empty states and image limits.
+- Additive SQLite migration adds `subcategory`, `suggested_department`, and `synthetic` columns without changing existing complaint IDs or deleting reports.
+- Database tables for `departments`, `issue_categories`, and `routing_rules`, seeded with configurable multi-department categories and proposed routing defaults.
+- Citizen form loads the category/subcategory catalog from the API and displays a suggested department.
+- Legacy category names (`Road damage`, `Water & drainage`, `Streetlight`, `Waste`, `Other`) remain accepted by the existing report API and are mapped to the expanded category groups.
+- Water, waste, heritage and other department recommendations are exposed in a transparent response; routing and priority defaults are demo configuration, not verified municipal service commitments.
+- Keyword-overlap triage endpoint (`POST /api/triage`) is explicitly labelled **rule-based** and returns an explanation without a confidence percentage.
+- Heritage Watch list and a heritage-oriented five-item inspection checklist; reports remain unverified allegations until assessed by authorized personnel.
+- Emergency notice: the ordinary report form is not an emergency response channel.
+- Original duplicate, assignment, repair-evidence and inspector-closure workflow retained.
 
-## Implementation details
+## API
 
-- UI: semantic HTML, CSS and vanilla JavaScript; no build step or external JS library.
-- API: Python standard-library `http.server`, JSON REST routes and SQLite (`sqlite3`).
-- Persistence: local SQLite database on the server. A deployment must use persistent storage if records should survive restarts.
-- Demo roles are navigation only, **not authentication or access control**. Do not use real citizen data or expose this prototype as a production municipal service.
-- All seeded evidence and records are synthetic. The rule scores are transparent demo heuristics, not validated models or real-world performance claims. No live municipal, map, SMS, identity or AI service is integrated.
+- `GET /api/health` — health check.
+- `GET /api/catalog` — active departments and category/subcategory routing defaults.
+- `POST /api/triage` — transparent keyword-rule suggestion; not trained AI.
+- `GET /api/reports`, `GET /api/reports/{id}`, `POST /api/reports`, `POST /api/reports/{id}` — existing demo report workflow.
+- `POST /api/demo/reset` — resets to synthetic seed records only when `NAGRIVANTA_DEMO_RESET=1`; disabled by default.
 
-## Round 1 plan changes
+## Data and configuration
 
-The proposal named React + TypeScript + Vite, FastAPI + Pydantic + SQLAlchemy, and SQLite. This MVP uses a dependency-free HTML/CSS/JavaScript interface and Python standard-library JSON API with SQLite. The change keeps the judge link easy to run and avoids build/dependency failures in the short event window. The workflow and explainable rules remain aligned with the proposal. Real authentication, hardened API permissions, production deployment, geospatial services and any municipal integration remain out of scope.
+The seeded department names and routing rules are **proposed examples**, not confirmed PMC department assignments. No PMC data, Open Data API, live municipal service, official heritage register, map provider, external AI, SMS, identity provider, or trained model is integrated. The official Open Data reference should be reviewed for its current dataset/API documentation before building an importer; this app does not scrape or assume that a departments page is a data API.
+
+Priority scores are illustrative heuristics, not measured outcomes. The rule-based suggestion is not trained AI, and all routing/classification decisions require human review.
+
+## Security and deployment limitations
+
+- The current four-role UI is a demo role switcher, **not server-side role-based authentication**. API routes are not protected by user identity. Use synthetic records only; do not deploy for real citizen use.
+- The default SQLite database is a local file. Render free services may not retain filesystem writes across redeploys/restarts unless persistent storage is explicitly configured. Do not claim durable storage without verifying the deployment plan.
+- Uploaded demo evidence is stored as data URLs in SQLite. Production use needs a reviewed file-storage strategy, access control, retention policy, upload validation and privacy/security review.
+- No credentials or external integrations are required. Do not add secrets to Git.
 
 ## Tests
 
-Run the API smoke/regression tests with:
-
 ```bash
 python -m unittest discover -s tests -v
+node --check public/app.js
 ```
 
-The tests use an isolated temporary SQLite database and cover the main state transitions, validation, duplicate linkage and inspection gate.
-
-
-## Public demo deployment
-
-A `render.yaml` Blueprint and `Procfile` are included for a quick Python web-service deploy. Push this folder to your Git repository, connect the repository to Render, and deploy the Blueprint. Then open the service URL and confirm `/api/health` responds with `ok: true`. Add the resulting public URL to the submission form. SQLite is a local file: attach persistent storage or use another durable database if demo records must survive service restarts/redeployments.
+The API tests use an isolated temporary SQLite database and cover the existing workflow plus catalog, heritage routing, waste/water routing and rule-based triage. Passing tests do not establish production security or real-world model performance.

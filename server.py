@@ -3,7 +3,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
-import json, os, re, sqlite3, uuid
+import base64, json, os, re, sqlite3, uuid
 from datetime import datetime, timezone
 from contextlib import contextmanager
 
@@ -11,7 +11,84 @@ ROOT = Path(__file__).resolve().parent
 PUBLIC = ROOT / "public"
 DB_PATH = Path(os.environ.get("DATABASE_PATH", str(ROOT / "nagrivanta.sqlite3")))
 PORT = int(os.environ.get("PORT", "8000"))
-CATEGORIES = {"Road damage", "Water & drainage", "Streetlight", "Waste", "Other"}
+LEGACY_CATEGORY_GROUPS = {
+    "Road damage": "Roads and Public Infrastructure",
+    "Water & drainage": "Water Supply and Drainage",
+    "Streetlight": "Electricity and Streetlights",
+    "Waste": "Solid Waste Management and Sanitation",
+    "Other": "Public Facilities and Municipal Services",
+}
+DEFAULT_DEPARTMENTS = [
+    ("roads", "Roads and Engineering"),
+    ("heritage", "Heritage Cell / Competent Authority"),
+    ("water", "Water Supply"),
+    ("drainage", "Drainage"),
+    ("waste", "Solid Waste Management"),
+    ("environment", "Gardens and Environment"),
+    ("electrical", "Electrical / Street Lighting"),
+    ("health", "Public Health"),
+    ("encroachment", "Encroachment / Building Permission"),
+    ("fire", "Fire Brigade / Disaster Management"),
+    ("facilities", "Public Facilities / Municipal Services"),
+    ("general", "General Municipal Services"),
+]
+DEFAULT_CATEGORIES = [
+    ("Roads and Public Infrastructure", "Potholes and damaged roads", "roads", 60, "pothole road damage"),
+    ("Roads and Public Infrastructure", "Broken footpaths and pavements", "roads", 50, "footpath pavement"),
+    ("Roads and Public Infrastructure", "Damaged bridges and public structures", "roads", 75, "bridge structure"),
+    ("Roads and Public Infrastructure", "Missing or damaged manhole covers", "roads", 75, "manhole cover"),
+    ("Roads and Public Infrastructure", "Damaged road signs", "roads", 45, "road sign"),
+    ("Roads and Public Infrastructure", "Unsafe road construction", "roads", 75, "unsafe construction"),
+    ("Roads and Public Infrastructure", "Damaged public infrastructure", "roads", 50, "public infrastructure"),
+    ("Heritage and Historical Sites", "Damage to historical buildings or structures", "heritage", 65, "heritage historical monument"),
+    ("Heritage and Historical Sites", "Suspected unauthorized alteration (requires assessment)", "heritage", 65, "alteration construction"),
+    ("Heritage and Historical Sites", "Monument vandalism, graffiti or defacement", "heritage", 60, "vandalism graffiti defacement"),
+    ("Heritage and Historical Sites", "Neglected heritage location or precinct", "heritage", 45, "neglected precinct"),
+    ("Heritage and Historical Sites", "Construction-related impact (unverified report)", "heritage", 65, "construction impact"),
+    ("Water Supply and Drainage", "Water leakage", "water", 60, "water leak"),
+    ("Water Supply and Drainage", "Water supply interruption or low pressure", "water", 50, "water supply pressure"),
+    ("Water Supply and Drainage", "Discoloured or potentially contaminated water", "water", 80, "discoloured contaminated water"),
+    ("Water Supply and Drainage", "Blocked drain", "drainage", 65, "blocked drain"),
+    ("Water Supply and Drainage", "Sewage overflow", "drainage", 85, "sewage overflow"),
+    ("Water Supply and Drainage", "Flooding or waterlogging", "drainage", 85, "flood waterlogging"),
+    ("Water Supply and Drainage", "Damaged water infrastructure", "water", 65, "water infrastructure"),
+    ("Solid Waste Management and Sanitation", "Garbage accumulation", "waste", 50, "garbage waste"),
+    ("Solid Waste Management and Sanitation", "Overflowing public bin", "waste", 55, "overflowing bin"),
+    ("Solid Waste Management and Sanitation", "Missed waste collection", "waste", 45, "missed collection"),
+    ("Solid Waste Management and Sanitation", "Illegal dumping (reported; unverified)", "waste", 60, "dumping debris"),
+    ("Solid Waste Management and Sanitation", "Construction debris", "waste", 55, "construction debris"),
+    ("Solid Waste Management and Sanitation", "Public toilet maintenance", "waste", 45, "public toilet"),
+    ("Solid Waste Management and Sanitation", "Open waste burning", "waste", 75, "waste burning smoke"),
+    ("Solid Waste Management and Sanitation", "Unsanitary public space", "waste", 55, "unsanitary sanitation"),
+    ("Gardens and Environment", "Damaged public garden or park equipment", "environment", 45, "garden park equipment"),
+    ("Gardens and Environment", "Fallen tree or dangerous branch", "environment", 75, "fallen tree branch"),
+    ("Gardens and Environment", "Damaged green space", "environment", 45, "green space"),
+    ("Gardens and Environment", "Suspected illegal tree cutting (requires review)", "environment", 65, "tree cutting"),
+    ("Gardens and Environment", "Pollution affecting a public area", "environment", 65, "pollution"),
+    ("Gardens and Environment", "Neglected lake or water body", "environment", 55, "lake water body"),
+    ("Gardens and Environment", "Damage to a designated natural feature", "environment", 60, "natural feature"),
+    ("Electricity and Streetlights", "Non-functional streetlight", "electrical", 45, "streetlight lighting"),
+    ("Electricity and Streetlights", "Exposed electrical wiring or public hazard", "electrical", 90, "exposed wiring electric shock"),
+    ("Electricity and Streetlights", "Damaged public lighting", "electrical", 55, "public lighting"),
+    ("Electricity and Streetlights", "Electrical hazard in a public facility", "electrical", 85, "electrical hazard"),
+    ("Public Health", "Mosquito breeding", "health", 65, "mosquito breeding"),
+    ("Public Health", "Pest infestation", "health", 60, "pest infestation"),
+    ("Public Health", "Public sanitation hazard", "health", 65, "sanitation hazard"),
+    ("Public Health", "Condition that may contribute to disease transmission", "health", 70, "disease health"),
+    ("Encroachment and Building-Related Complaints", "Obstructed footpath or public access", "encroachment", 60, "obstructed footpath access"),
+    ("Encroachment and Building-Related Complaints", "Encroachment on public space (unverified)", "encroachment", 55, "encroachment public space"),
+    ("Encroachment and Building-Related Complaints", "Suspected unauthorized construction (unverified)", "encroachment", 60, "unauthorized construction"),
+    ("Encroachment and Building-Related Complaints", "Construction debris obstructing road", "roads", 60, "construction debris road"),
+    ("Fire Safety and Disaster Management", "Blocked emergency access", "fire", 90, "blocked emergency access"),
+    ("Fire Safety and Disaster Management", "Storm-related public hazard", "fire", 75, "storm hazard"),
+    ("Fire Safety and Disaster Management", "Flooding or fallen tree obstructing access", "fire", 85, "flood fallen tree access"),
+    ("Fire Safety and Disaster Management", "Damaged public safety infrastructure", "fire", 80, "public safety infrastructure"),
+    ("Public Facilities and Municipal Services", "Damaged public building", "facilities", 55, "public building"),
+    ("Public Facilities and Municipal Services", "Municipal school maintenance", "facilities", 55, "school maintenance"),
+    ("Public Facilities and Municipal Services", "Accessibility problem", "facilities", 60, "accessibility"),
+    ("Public Facilities and Municipal Services", "Damaged community centre or public amenity", "facilities", 50, "community centre public amenity"),
+    ("Public Facilities and Municipal Services", "Other municipal service issue", "general", 40, "municipal service"),
+]
 MAX_BODY = 3_000_000
 
 
@@ -60,9 +137,173 @@ def init_db():
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           FOREIGN KEY(master_id) REFERENCES reports(id)
         )''')
+        # Additive migrations preserve existing report IDs and workflow history.
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(reports)")}
+        for name, definition in (
+            ("subcategory", "TEXT NOT NULL DEFAULT ''"),
+            ("suggested_department", "TEXT"),
+            ("synthetic", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in columns:
+                db.execute(f"ALTER TABLE reports ADD COLUMN {name} {definition}")
+        db.execute('''CREATE TABLE IF NOT EXISTS departments (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1
+        )''')
+        db.execute('''CREATE TABLE IF NOT EXISTS issue_categories (
+          id TEXT PRIMARY KEY, category TEXT NOT NULL, subcategory TEXT NOT NULL,
+          department_id TEXT NOT NULL REFERENCES departments(id),
+          default_priority INTEGER NOT NULL DEFAULT 40, keywords TEXT NOT NULL DEFAULT '',
+          active INTEGER NOT NULL DEFAULT 1, UNIQUE(category, subcategory)
+        )''')
+        db.execute('''CREATE TABLE IF NOT EXISTS routing_rules (
+          id TEXT PRIMARY KEY, category_id TEXT NOT NULL REFERENCES issue_categories(id),
+          department_id TEXT NOT NULL REFERENCES departments(id), priority INTEGER NOT NULL DEFAULT 100,
+          active INTEGER NOT NULL DEFAULT 1
+        )''')
+        seed_catalog(db)
         db.execute('CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_reports_category_subcategory ON reports(category, subcategory)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_reports_department ON reports(department)')
+        # Backfill new fields without changing original report text or IDs.
+        for row in db.execute("SELECT id, category, subcategory, suggested_department FROM reports").fetchall():
+            group = canonical_category(row["category"])
+            detail = row["subcategory"] or legacy_subcategory(row["category"])
+            suggested = row["suggested_department"] or suggested_department(group, detail)
+            db.execute("UPDATE reports SET subcategory=?, suggested_department=? WHERE id=?",
+                       (detail, suggested, row["id"]))
         if db.execute('SELECT COUNT(*) FROM reports').fetchone()[0] == 0:
             seed_demo(db)
+
+
+def slug(value):
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def seed_catalog(db):
+    for did, name in DEFAULT_DEPARTMENTS:
+        db.execute("INSERT OR IGNORE INTO departments(id,name) VALUES (?,?)", (did, name))
+    for category, subcategory, department_id, priority, keywords in DEFAULT_CATEGORIES:
+        cid = slug(category + "-" + subcategory)
+        db.execute("""INSERT OR IGNORE INTO issue_categories
+          (id,category,subcategory,department_id,default_priority,keywords)
+          VALUES (?,?,?,?,?,?)""", (cid, category, subcategory, department_id, priority, keywords))
+    # Preserve five historic labels as accepted aliases for existing clients.
+    for legacy, group in LEGACY_CATEGORY_GROUPS.items():
+        db.execute("""INSERT OR IGNORE INTO issue_categories
+          (id,category,subcategory,department_id,default_priority,keywords)
+          VALUES (?,?,?,?,?,?)""",
+          (slug(legacy + "-legacy"), group, legacy_subcategory(legacy),
+           department_for(group, legacy_subcategory(legacy)), 45, legacy.lower()))
+    for category_row in db.execute("SELECT id, department_id FROM issue_categories").fetchall():
+        db.execute("""INSERT OR IGNORE INTO routing_rules(id,category_id,department_id,priority)
+          VALUES (?,?,?,100)""",
+          ("route-" + category_row["id"], category_row["id"], category_row["department_id"]))
+
+
+def canonical_category(category):
+    return LEGACY_CATEGORY_GROUPS.get(category, category)
+
+
+def legacy_subcategory(category):
+    return {
+        "Road damage": "Potholes and damaged roads",
+        "Water & drainage": "Blocked drain",
+        "Streetlight": "Non-functional streetlight",
+        "Waste": "Garbage accumulation",
+        "Other": "Other municipal service issue",
+    }.get(category, "")
+
+
+def department_for(category, subcategory=""):
+    normalized = canonical_category(category)
+    for group, detail, department_id, _priority, _keywords in DEFAULT_CATEGORIES:
+        if group == normalized and (not subcategory or detail == subcategory):
+            return dict(DEFAULT_DEPARTMENTS).get(department_id, "General Municipal Services")
+    mapping = {
+        "Roads and Public Infrastructure": "roads",
+        "Heritage and Historical Sites": "heritage",
+        "Water Supply and Drainage": "water",
+        "Solid Waste Management and Sanitation": "waste",
+        "Gardens and Environment": "environment",
+        "Electricity and Streetlights": "electrical",
+        "Public Health": "health",
+        "Encroachment and Building-Related Complaints": "encroachment",
+        "Fire Safety and Disaster Management": "fire",
+        "Public Facilities and Municipal Services": "facilities",
+    }
+    did = mapping.get(normalized, "general")
+    return dict(DEFAULT_DEPARTMENTS).get(did, "General Municipal Services")
+
+
+def department_from_db(db, category, subcategory=""):
+    row = db.execute("""SELECT d.name FROM issue_categories c
+      JOIN routing_rules r ON r.category_id=c.id AND r.active=1
+      JOIN departments d ON d.id=r.department_id AND d.active=1
+      WHERE c.category=? AND c.subcategory=? AND c.active=1
+      ORDER BY r.priority DESC,c.id LIMIT 1""",
+      (canonical_category(category), subcategory)).fetchone()
+    if row:
+        return row["name"]
+    return department_for(category, subcategory)
+
+
+def normalize_department(db, value):
+    aliases = {
+        "roads": "Roads and Engineering",
+        "electrical": "Electrical / Street Lighting",
+        "water & sanitation": "Water Supply",
+        "water and sanitation": "Water Supply",
+        "waste": "Solid Waste Management",
+        "public health": "Public Health",
+    }
+    name = aliases.get((value or "").strip().casefold(), (value or "").strip())
+    row = db.execute("SELECT name FROM departments WHERE name=? AND active=1", (name,)).fetchone()
+    return row["name"] if row else None
+
+
+def suggested_department(category, subcategory=""):
+    return department_for(category, subcategory)
+
+
+def catalog_payload():
+    with db_session() as db:
+        departments = [dict(row) for row in db.execute(
+            "SELECT id,name FROM departments WHERE active=1 ORDER BY name")]
+        rows = db.execute("""SELECT c.category,c.subcategory,c.department_id,d.name AS department,
+          c.default_priority,c.keywords
+          FROM issue_categories c JOIN departments d ON d.id=c.department_id
+          WHERE c.active=1 ORDER BY c.category,c.subcategory""").fetchall()
+        categories = {}
+        for row in rows:
+            group = row["category"]
+            item = categories.setdefault(group, {"name": group, "subcategories": []})
+            item["subcategories"].append({
+                "name": row["subcategory"], "department": row["department"],
+                "default_priority": row["default_priority"], "keywords": row["keywords"],
+            })
+        return {"departments": departments, "categories": list(categories.values()),
+                "notice": "Routing and priority are demo recommendations; confirm with the competent authority."}
+
+
+def classify_description(db, text):
+    tokens = tokenize(text)
+    best = None
+    for row in db.execute("""SELECT c.category,c.subcategory,c.keywords,d.name AS department
+      FROM issue_categories c JOIN routing_rules r ON r.category_id=c.id AND r.active=1
+      JOIN departments d ON d.id=r.department_id AND d.active=1
+      WHERE c.active=1 ORDER BY r.priority DESC"""):
+        keywords = tokenize(row["keywords"])
+        overlap = len(tokens & keywords)
+        if overlap and (best is None or overlap > best["matched_terms"]):
+            best = {"category": row["category"], "subcategory": row["subcategory"],
+                    "department": row["department"], "matched_terms": overlap}
+    if best:
+        best["method"] = "rule-based"
+        best["explanation"] = "Suggested because the description overlaps configured category keywords. Human review is required."
+    else:
+        best = {"category": None, "subcategory": None, "department": None,
+                "method": "rule-based", "explanation": "No configured keyword match; select a category manually."}
+    return best
 
 
 def tokenize(text):
@@ -79,9 +320,16 @@ def score_completeness(report):
     return min(100, sum(f["points"] for f in factors)), factors
 
 
-def priority_for(report, corroborating_count=1):
-    category_points = {"Road damage":24, "Water & drainage":22, "Streetlight":17, "Waste":13, "Other":12}.get(report["category"], 12)
-    safety_terms = ("school", "traffic", "accident", "danger", "open manhole", "injury", "electric shock", "flood")
+def priority_for(report, corroborating_count=1, configured_priority=None):
+    category_points = configured_priority or {
+        "Roads and Public Infrastructure": 24, "Heritage and Historical Sites": 20,
+        "Water Supply and Drainage": 22, "Solid Waste Management and Sanitation": 15,
+        "Gardens and Environment": 16, "Electricity and Streetlights": 20,
+        "Public Health": 21, "Encroachment and Building-Related Complaints": 16,
+        "Fire Safety and Disaster Management": 25, "Public Facilities and Municipal Services": 14,
+    }.get(canonical_category(report["category"]), 12)
+    safety_terms = ("school", "traffic", "accident", "danger", "open manhole", "injury",
+                    "electric shock", "exposed wiring", "fire", "flood", "sewage", "blocked emergency")
     text = (report.get("title", "") + " " + report.get("description", "")).lower()
     safety = 22 if any(term in text for term in safety_terms) else 0
     corroboration = min(20, max(0, (corroborating_count - 1) * 7))
@@ -107,6 +355,12 @@ def pack(row):
     for key in ("completeness_factors", "priority_factors", "verification", "events"):
         if item.get(key):
             item[key] = json.loads(item[key])
+    item["category_group"] = canonical_category(item.get("category", ""))
+    if not item.get("subcategory"):
+        item["subcategory"] = legacy_subcategory(item.get("category", ""))
+    if not item.get("suggested_department"):
+        item["suggested_department"] = suggested_department(
+            item.get("category", ""), item.get("subcategory", ""))
     return item
 
 
@@ -120,7 +374,7 @@ def find_duplicate(db, report):
     target_tokens = tokenize(report["title"] + " " + report["description"])
     for row in candidates:
         old = dict(row)
-        if old["category"] != report["category"]:
+        if canonical_category(old["category"]) != canonical_category(report["category"]):
             continue
         same_area = old["area"].strip().casefold() == report["area"].strip().casefold()
         same_address = old["address"].strip().casefold() == report["address"].strip().casefold()
@@ -139,28 +393,40 @@ def find_duplicate(db, report):
 def insert_report(db, data, *, status="submitted", department=None, crew=None, after_photo=None, repair_note=None, verification=None, events=None, created_at=None):
     rid = data.get("id") or "NG-" + uuid.uuid4().hex[:7].upper()
     data = {**data, "id":rid}
+    subcategory = data.get("subcategory") or legacy_subcategory(data.get("category", ""))
+    route = data.get("suggested_department") or department_from_db(db, data.get("category", ""), subcategory)
+    configured_priority = db.execute("""SELECT c.default_priority FROM issue_categories c
+      WHERE c.category=? AND c.subcategory=? AND c.active=1""",
+      (canonical_category(data.get("category", "")), subcategory)).fetchone()
+    configured_priority = configured_priority["default_priority"] if configured_priority else None
     completeness, cf = score_completeness(data)
     master_id, reason = find_duplicate(db, data)
     provisional_count = 1
     if master_id:
         provisional_count = 1 + db.execute("SELECT COUNT(*) FROM reports WHERE master_id=? OR id=?", (master_id, master_id)).fetchone()[0]
-    priority, pf = priority_for(data, provisional_count)
+    priority, pf = priority_for(data, provisional_count, configured_priority)
     created = created_at or now()
     ev = events or [event("Citizen", "Report submitted", "Synthetic demo record" if data.get("synthetic") else "")]
     if master_id:
         ev.append(event("System", "Linked to master issue", reason or "Possible duplicate"))
     db.execute('''INSERT INTO reports (id,title,category,description,area,address,before_photo,after_photo,status,
       completeness,completeness_factors,priority,priority_factors,master_id,duplicate_reason,department,crew,repair_note,
-      verification,events,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+      verification,events,created_at,updated_at,subcategory,suggested_department,synthetic)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
       (rid,data["title"],data["category"],data["description"],data["area"],data["address"],data["before_photo"],after_photo,status,
        completeness,json.dumps(cf),priority,json.dumps(pf),master_id,reason,department,crew,repair_note,
-       json.dumps(verification) if verification is not None else None,json.dumps(ev),created,now()))
+       json.dumps(verification) if verification is not None else None,json.dumps(ev),created,now(),
+       subcategory,route,1 if data.get("synthetic") else 0))
     # Recompute the master score after preserving each linked source report.
     root = master_id or rid
     group = db.execute("SELECT * FROM reports WHERE id=? OR master_id=?", (root, root)).fetchall()
     count = len(group)
     for member in group:
-        p, factors = priority_for(dict(member), count)
+        priority_row = db.execute("""SELECT default_priority FROM issue_categories
+          WHERE category=? AND subcategory=? AND active=1""",
+          (canonical_category(member["category"]), member["subcategory"])).fetchone()
+        base = priority_row["default_priority"] if priority_row else None
+        p, factors = priority_for(dict(member), count, base)
         db.execute("UPDATE reports SET priority=?, priority_factors=?, updated_at=? WHERE id=?", (p,json.dumps(factors),now(),member["id"]))
     return rid, master_id, reason
 
@@ -174,9 +440,9 @@ def seed_demo(db):
     ]
     for item in cases:
         if item["id"] == "NG-DEMO-103":
-            insert_report(db,item,status="assigned",department="Electrical",crew="Crew B",events=[event("Citizen","Report submitted","Synthetic demo record"),event("Municipal","Work order assigned","Electrical • Crew B")])
+            insert_report(db,item,status="assigned",department="Electrical / Street Lighting",crew="Crew B",events=[event("Citizen","Report submitted","Synthetic demo record"),event("Municipal","Work order assigned","Electrical / Street Lighting • Crew B")])
         elif item["id"] == "NG-DEMO-104":
-            insert_report(db,item,status="repair_submitted",department="Water & Sanitation",crew="Crew A",after_photo=sample_photo("Drain • after", "#e6f1e6", "#188a66"),repair_note="Removed debris from the drain; ready for inspection.",events=[event("Citizen","Report submitted","Synthetic demo record"),event("Municipal","Work order assigned","Water & Sanitation • Crew A"),event("Field Crew","Repair submitted","Synthetic after-evidence; inspect before closure")])
+            insert_report(db,item,status="repair_submitted",department="Drainage",crew="Crew A",after_photo=sample_photo("Drain • after", "#e6f1e6", "#188a66"),repair_note="Removed debris from the drain; ready for inspection.",events=[event("Citizen","Report submitted","Synthetic demo record"),event("Municipal","Work order assigned","Drainage • Crew A"),event("Field Crew","Repair submitted","Synthetic after-evidence; inspect before closure")])
         else:
             insert_report(db,item)
 
@@ -210,7 +476,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return json_response(self, {"ok":True,"service":"Nagrivanta demo API"})
+            return json_response(self, {"ok":True,"service":"Nagrivanta demo API",
+                "demo_reset_enabled":os.environ.get("NAGRIVANTA_DEMO_RESET","0")=="1"})
+        if path == "/api/catalog":
+            return json_response(self, catalog_payload())
         if path == "/api/reports":
             with db_session() as db:
                 return json_response(self, {"reports":all_reports(db)})
@@ -226,9 +495,19 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             data = self.body()
+            if not isinstance(data, dict):
+                raise ValueError("Request body must be a JSON object.")
+            if path == "/api/triage":
+                description = data.get("description", "")
+                if not isinstance(description, str) or len(description) > 2000:
+                    raise ValueError("Provide a description under 2,000 characters.")
+                with db_session() as db:
+                    return json_response(self, {"recommendation": classify_description(db, description)})
             if path == "/api/reports":
                 return self.create_report(data)
             if path == "/api/demo/reset":
+                if os.environ.get("NAGRIVANTA_DEMO_RESET","0") != "1":
+                    return json_response(self,{"error":"Demo reset is disabled. Enable it only for a disposable synthetic-data demo."},403)
                 with db_session() as db:
                     db.execute("UPDATE reports SET master_id=NULL")
                     db.execute("DELETE FROM reports")
@@ -248,21 +527,55 @@ class Handler(BaseHTTPRequestHandler):
         for key, label in (("title","Short title"),("description","Description"),("area","Ward / area"),("address","Specific location"),("before_photo","Photo evidence")):
             if not isinstance(data.get(key), str) or not data[key].strip():
                 raise ValueError(f"{label} is required.")
-        if data.get("category") not in CATEGORIES:
-            raise ValueError("Choose a valid issue category.")
+        if not isinstance(data.get("category"), str) or not isinstance(data.get("subcategory", ""), str):
+            raise ValueError("Choose a valid category and subcategory.")
+        category = data["category"].strip()
+        subcategory = data.get("subcategory", "").strip()
+        if category in LEGACY_CATEGORY_GROUPS and not subcategory:
+            subcategory = legacy_subcategory(category)
+        group = canonical_category(category)
         if len(data["title"]) > 100 or len(data["description"]) > 1200:
             raise ValueError("Title or description is too long.")
         self.validate_photo(data["before_photo"],"Initial photo")
-        data = {k:data[k].strip() if isinstance(data.get(k),str) else data.get(k) for k in ("title","category","description","area","address","before_photo")}
         with db_session() as db:
+            selected = db.execute("""SELECT c.subcategory FROM issue_categories c
+              WHERE c.category=? AND c.subcategory=? AND c.active=1""", (group, subcategory)).fetchone()
+            if not selected:
+                raise ValueError("Choose a valid category and subcategory.")
+            route = department_from_db(db, group, subcategory)
+            data = {k:data[k].strip() for k in ("title","description","area","address","before_photo")}
+            data.update({"category":group,"subcategory":subcategory,"suggested_department":route})
             rid, master, reason = insert_report(db,data)
             row = db.execute("SELECT * FROM reports WHERE id=?", (rid,)).fetchone()
-            return json_response(self,{"report":pack(row),"duplicate":({"master_id":master,"reason":reason} if master else None)},201)
+            return json_response(self,{"report":pack(row),"duplicate":({"master_id":master,"reason":reason} if master else None),
+                "recommendation":{"department":route,"explanation":"Suggested from the configured category/subcategory route; an authorized municipal team must confirm."}},201)
 
     @staticmethod
     def validate_photo(value, label):
-        if not isinstance(value,str) or not value.startswith("data:image/") or len(value) > 1_500_000:
+        match = re.fullmatch(r"data:(image/(?:jpeg|png|webp|svg\+xml));base64,([A-Za-z0-9+/]*={0,2})",
+                             value or "") if isinstance(value, str) else None
+        if not match or len(value) > 1_500_000:
             raise ValueError(f"{label} must be an image under about 1 MB.")
+        try:
+            payload = base64.b64decode(match.group(2), validate=True)
+        except ValueError as exc:
+            raise ValueError(f"{label} is not valid base64 image data.") from exc
+        if not payload:
+            raise ValueError(f"{label} is empty.")
+        if match.group(1) == "image/svg+xml":
+            svg = payload.decode("utf-8", "ignore").lower()
+            if any(token in svg for token in ("<script", "onload=", "onerror=", "<foreignobject",
+                                               "javascript:", "href=", "<!doctype", "<!entity",
+                                               "<style", "url(", "xlink:")):
+                raise ValueError(f"{label} contains unsupported SVG content.")
+        else:
+            valid_signature = (
+                (match.group(1) == "image/png" and payload.startswith(b"\x89PNG\r\n\x1a\n")) or
+                (match.group(1) == "image/jpeg" and payload.startswith(b"\xff\xd8\xff")) or
+                (match.group(1) == "image/webp" and payload.startswith(b"RIFF") and payload[8:12] == b"WEBP")
+            )
+            if not valid_signature:
+                raise ValueError(f"{label} does not match its declared image type.")
 
     def transition(self, rid, data):
         action=data.get("action")
@@ -275,9 +588,10 @@ class Handler(BaseHTTPRequestHandler):
             if action == "assign":
                 if r["status"] not in ("submitted","needs_rework"):
                     raise ValueError("Only new or returned issues can be assigned.")
-                department=(data.get("department") or "").strip()
+                requested_department=(data.get("department") or "").strip()
+                department=normalize_department(db, requested_department)
                 crew=(data.get("crew") or "").strip()
-                if not department or not crew: raise ValueError("Select a department and crew.")
+                if not department or not crew: raise ValueError("Select a configured department and crew.")
                 status="assigned"
                 events.append(event(actor,"Work order assigned",f"{department} • {crew}"))
                 db.execute("UPDATE reports SET department=?,crew=?,status=?,events=?,updated_at=? WHERE id=?",(department,crew,status,json.dumps(events),now(),rid))

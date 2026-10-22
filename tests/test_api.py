@@ -1,4 +1,4 @@
-import importlib.util, json, os, tempfile, threading, unittest, urllib.request, urllib.error
+import base64, importlib.util, json, os, sqlite3, tempfile, threading, unittest, urllib.request, urllib.error
 from pathlib import Path
 
 MODULE_PATH=Path(__file__).resolve().parents[1]/'server.py'
@@ -48,5 +48,90 @@ class ApiTests(unittest.TestCase):
     def test_assignment_requires_department_and_crew(self):
         code,d=self.request('/api/reports/NG-DEMO-101',{'action':'assign','actor':'Municipal','department':'','crew':''},'POST')
         self.assertEqual(code,400); self.assertIn('department',d['error'].lower())
+    def test_catalog_includes_heritage_and_multiple_departments(self):
+        code,d=self.request('/api/catalog')
+        self.assertEqual(code,200)
+        groups={item['name']:item for item in d['categories']}
+        self.assertIn('Heritage and Historical Sites',groups)
+        self.assertGreaterEqual(len(d['departments']),10)
+        self.assertTrue(any('graffiti' in item['name'].lower()
+                            for item in groups['Heritage and Historical Sites']['subcategories']))
+    def test_heritage_report_gets_competent_authority_recommendation(self):
+        payload={'title':'Graffiti on old stone gate','category':'Heritage and Historical Sites',
+                 'subcategory':'Monument vandalism, graffiti or defacement',
+                 'description':'Graffiti is visible on a historic stone gate and needs an authorized assessment.',
+                 'area':'Demo Ward','address':'Synthetic heritage location',
+                 'before_photo':app.sample_photo('heritage test')}
+        code,d=self.request('/api/reports',payload,'POST')
+        self.assertEqual(code,201)
+        self.assertEqual(d['report']['category_group'],'Heritage and Historical Sites')
+        self.assertIn('Heritage Cell',d['recommendation']['department'])
+        self.assertEqual(d['report']['status'],'submitted')
+    def test_water_and_waste_routes_are_configured(self):
+        examples=[
+            ('Water Supply and Drainage','Blocked drain','Drainage'),
+            ('Solid Waste Management and Sanitation','Overflowing public bin','Solid Waste Management'),
+        ]
+        for category,subcategory,department in examples:
+            payload={'title':'Issue needing municipal attention','category':category,'subcategory':subcategory,
+                     'description':'A public issue needs review by the responsible department.',
+                     'area':'Demo Ward','address':f'Synthetic {subcategory} location',
+                     'before_photo':app.sample_photo('routing test')}
+            code,d=self.request('/api/reports',payload,'POST')
+            self.assertEqual(code,201)
+            self.assertEqual(d['recommendation']['department'],department)
+    def test_rule_based_triage_discloses_method(self):
+        code,d=self.request('/api/triage',{'description':'Garbage is overflowing from a public bin.'},'POST')
+        self.assertEqual(code,200)
+        result=d['recommendation']
+        self.assertEqual(result['method'],'rule-based')
+        self.assertEqual(result['category'],'Solid Waste Management and Sanitation')
+        self.assertIn('human review',result['explanation'].lower())
+    def test_additive_migration_preserves_legacy_report_id_and_category(self):
+        old_path=app.DB_PATH
+        with tempfile.TemporaryDirectory() as folder:
+            legacy_path=Path(folder)/'legacy.sqlite3'
+            db=sqlite3.connect(legacy_path)
+            db.execute('''CREATE TABLE reports (
+              id TEXT PRIMARY KEY, category TEXT NOT NULL, status TEXT NOT NULL, department TEXT
+            )''')
+            db.execute("INSERT INTO reports(id,category,status,department) VALUES (?,?,?,?)",
+                       ('NG-LEGACY-123','Road damage','submitted',None))
+            db.commit(); db.close()
+            try:
+                app.DB_PATH=legacy_path
+                app.init_db()
+                db=sqlite3.connect(legacy_path)
+                row=db.execute("SELECT id,category,subcategory,suggested_department FROM reports WHERE id=?",
+                               ('NG-LEGACY-123',)).fetchone()
+                db.close()
+                self.assertEqual(row[0],'NG-LEGACY-123')
+                self.assertEqual(row[1],'Road damage')
+                self.assertTrue(row[2])
+                self.assertEqual(row[3],'Roads and Engineering')
+            finally:
+                app.DB_PATH=old_path
+    def test_demo_reset_is_disabled_unless_explicitly_enabled(self):
+        previous=os.environ.pop('NAGRIVANTA_DEMO_RESET',None)
+        try:
+            code,d=self.request('/api/demo/reset',{},'POST')
+            self.assertEqual(code,403)
+            self.assertIn('disabled',d['error'].lower())
+        finally:
+            if previous is not None: os.environ['NAGRIVANTA_DEMO_RESET']=previous
+    def test_unsafe_svg_upload_is_rejected(self):
+        unsafe='data:image/svg+xml;base64,'+base64.b64encode(b'<svg onload="alert(1)"></svg>').decode()
+        payload={'title':'Test upload','category':'Road damage','description':'A sufficiently detailed report description for validation.',
+                 'area':'Ward Test','address':'Test Lane','before_photo':unsafe}
+        code,d=self.request('/api/reports',payload,'POST')
+        self.assertEqual(code,400)
+        self.assertIn('unsupported SVG',d['error'])
+    def test_non_string_category_is_rejected_cleanly(self):
+        payload={'title':'Test category','category':['Road damage'],'subcategory':'',
+                 'description':'A sufficiently detailed report description for validation.',
+                 'area':'Ward Test','address':'Test Lane','before_photo':app.sample_photo('test')}
+        code,d=self.request('/api/reports',payload,'POST')
+        self.assertEqual(code,400)
+        self.assertIn('category',d['error'].lower())
 
 if __name__=='__main__': unittest.main()
