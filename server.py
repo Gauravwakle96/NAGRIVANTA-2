@@ -296,8 +296,8 @@ def init_db():
             suggested = row["suggested_department"] or suggested_department(group, detail)
             db.execute("UPDATE reports SET subcategory=?, suggested_department=? WHERE id=?",
                        (detail, suggested, row["id"]))
-        if db.execute('SELECT COUNT(*) FROM reports').fetchone()[0] == 0:
-            seed_demo(db)
+        # Never create synthetic complaints implicitly during startup. Demo
+        # records are initialized only through the protected demo-reset action.
         db.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (?,?)",(2,now()))
     # Older builds kept data URLs inside the reports table. Move those bytes
     # into private files without changing report IDs, status, or event history.

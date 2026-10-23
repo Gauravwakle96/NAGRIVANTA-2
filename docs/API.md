@@ -44,6 +44,6 @@ Statuses: `submitted`, `assigned`, `in_progress`, `repair_submitted`, `needs_rew
 - `POST /api/admin/config/departments` — create/update department.
 - `GET /api/admin/audit` — system administrator only; recent audit entries.
 - `GET /api/admin/notifications` — system administrator only; in-app notification totals grouped by event type.
-- `POST /api/demo/reset` — system administrator plus `NAGRIVANTA_DEMO_RESET=1`; refused if non-synthetic reports exist. Avoid enabling on any shared/production service.
+- `POST /api/demo/reset` — system administrator plus `NAGRIVANTA_DEMO_RESET=1`; explicitly initializes or replaces the four synthetic demo reports and is refused if non-synthetic reports exist. No demo reports are created automatically at startup. Avoid enabling on any shared/production service.
 
 All admin and workflow writes require a valid session and CSRF token. Errors are returned as bounded JSON messages; internal exception details are not returned to clients.

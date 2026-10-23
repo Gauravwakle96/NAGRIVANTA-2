@@ -27,6 +27,7 @@ Indexes cover report status/category/department/owner/assignee, session expiry, 
 - Existing report IDs, statuses, descriptions, event history and categories are preserved.
 - Missing columns/tables are added; new report owner/assignee/coordinates remain nullable for legacy records.
 - Legacy category/subcategory and suggested department values are backfilled without changing the original report ID.
+- Fresh database startup initializes the catalog but does not create complaint records. Synthetic demo reports are created only through the explicit system-admin-only demo reset endpoint when `NAGRIVANTA_DEMO_RESET=1`; the operation refuses to run if any non-synthetic report exists.
 - Legacy data-URL evidence is moved to generated files and references become `evidence:<uuid>`. PNG/JPEG/WebP signatures keep their image content type. Other legacy bytes are preserved as `application/octet-stream` attachments, never served inline.
 - A database backup and evidence-directory backup must be made before deploying against an existing production database. Test migration on a copy and verify report IDs, history and downloads before switching traffic.
 - Files and SQLite cannot participate in one atomic transaction. The implementation writes a uniquely named file and then its metadata in the active database transaction; a crash at the boundary may leave an orphan file. Production operations should include reconciliation/backup tooling.
