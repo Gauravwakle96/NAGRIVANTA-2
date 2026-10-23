@@ -9,3 +9,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
+      # Set these private values in Render before the first deployment that
+      # should create the initial system administrator. They are not committed.
+      - key: NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: NAGRIVANTA_BOOTSTRAP_ADMIN_NAME
+        value: System Administrator

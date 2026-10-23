@@ -891,18 +891,31 @@ def analytics_payload(db):
 
 
 def bootstrap_admin():
-    email = os.environ.get("NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL","").strip()
-    password = os.environ.get("NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD")
-    if not email:
-        return
-    if not password:
-        raise RuntimeError("NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD is required when bootstrap email is set.")
     with db_session() as db:
-        normalized = normalize_email(email)
-        if db.execute("SELECT 1 FROM users WHERE email=?",(normalized,)).fetchone():
+        # Bootstrap is a one-time recovery path, not a way to mint additional
+        # system administrators or rotate credentials on each Render restart.
+        if db.execute("SELECT 1 FROM users WHERE role='system_admin' LIMIT 1").fetchone():
             return
-        name = os.environ.get("NAGRIVANTA_BOOTSTRAP_ADMIN_NAME","System Administrator")
-        create_user(db,normalized,name,password,"system_admin")
+
+        email = os.environ.get("NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL","").strip()
+        password = os.environ.get("NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD")
+        if not email:
+            return
+        if not password:
+            raise RuntimeError("NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD is required when bootstrap email is set.")
+
+        try:
+            normalized = normalize_email(email)
+            if db.execute("SELECT 1 FROM users WHERE email=? COLLATE NOCASE",(normalized,)).fetchone():
+                raise RuntimeError(
+                    "The bootstrap email already belongs to an account. Choose a new unused email; "
+                    "bootstrap never promotes existing accounts."
+                )
+            name = os.environ.get("NAGRIVANTA_BOOTSTRAP_ADMIN_NAME","System Administrator")
+            create_user(db,normalized,name,password,"system_admin")
+        except ValueError as exc:
+            raise RuntimeError(f"System administrator bootstrap failed: {exc}") from exc
+
         row = db.execute("SELECT id FROM users WHERE email=?",(normalized,)).fetchone()
         record_audit(db,row["id"],"bootstrap_admin_created","user",row["id"])
 
