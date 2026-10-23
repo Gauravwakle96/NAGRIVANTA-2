@@ -1598,7 +1598,10 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self,{"ok":True,"id":department_id})
 
     def static_file(self,path):
-        rel = "index.html" if path in {"","/"} else path.lstrip("/")
+        # /admin is a convenience entry point to the same role-aware SPA.
+        # The account role still comes only from the authenticated session;
+        # visiting this path never grants administrator access.
+        rel = "index.html" if path in {"","/","/admin"} else path.lstrip("/")
         target = (PUBLIC / rel).resolve()
         if PUBLIC.resolve() not in target.parents or not target.is_file():
             return json_response(self,{"error":"Not found."},404)

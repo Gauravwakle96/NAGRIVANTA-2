@@ -120,6 +120,14 @@ class ApiTests(unittest.TestCase):
         code, _, _ = self.request("/api/analytics")
         self.assertEqual(code, 401)
 
+    def test_admin_entry_route_serves_only_the_role_aware_sign_in_shell(self):
+        code, page, headers = self.request("/admin")
+        self.assertEqual(code, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertIn(b"Sign in to your workspace", page)
+        # Dashboard data remains backend-protected regardless of the entry URL.
+        self.assertEqual(self.request("/api/admin/users")[0], 401)
+
     def test_registration_creates_citizen_and_rejects_privileged_role(self):
         code, data, headers = self.request("/api/auth/register", {
             "email": "new.citizen@example.test", "display_name": "New Citizen", "password": "Another-Strong-2026!"
