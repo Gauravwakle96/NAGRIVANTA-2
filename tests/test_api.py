@@ -120,6 +120,14 @@ class ApiTests(unittest.TestCase):
         code, _, _ = self.request("/api/analytics")
         self.assertEqual(code, 401)
 
+    def test_admin_entry_route_serves_only_the_role_aware_sign_in_shell(self):
+        code, page, headers = self.request("/admin")
+        self.assertEqual(code, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertIn(b"Sign in to your workspace", page)
+        # Dashboard data remains backend-protected regardless of the entry URL.
+        self.assertEqual(self.request("/api/admin/users")[0], 401)
+
     def test_registration_creates_citizen_and_rejects_privileged_role(self):
         code, data, headers = self.request("/api/auth/register", {
             "email": "new.citizen@example.test", "display_name": "New Citizen", "password": "Another-Strong-2026!"
@@ -326,6 +334,61 @@ class ApiTests(unittest.TestCase):
         finally:
             if previous is not None:
                 os.environ["NAGRIVANTA_DEMO_RESET"]=previous
+
+    def test_bootstrap_creates_only_the_first_admin_and_never_promotes_a_citizen(self):
+        keys = (
+            "NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL",
+            "NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD",
+            "NAGRIVANTA_BOOTSTRAP_ADMIN_NAME",
+        )
+        previous_env = {key: os.environ.get(key) for key in keys}
+        previous_db, previous_uploads = app.DB_PATH, app.UPLOADS_DIR
+        with tempfile.TemporaryDirectory() as folder:
+            try:
+                for key in keys:
+                    os.environ.pop(key, None)
+                app.DB_PATH = Path(folder) / "bootstrap.sqlite3"
+                app.UPLOADS_DIR = Path(folder) / "uploads"
+                app.init_db()
+                with app.db_session() as db:
+                    app.create_user(db, "citizen@example.test", "Existing Citizen",
+                                    "Citizen-Password-2026!", "citizen")
+
+                os.environ["NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL"] = "citizen@example.test"
+                os.environ["NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD"] = "Strong-Admin-2026!"
+                with self.assertRaisesRegex(RuntimeError, "already belongs"):
+                    app.bootstrap_admin()
+                with app.db_session() as db:
+                    row = db.execute("SELECT role FROM users WHERE email=?",
+                                     ("citizen@example.test",)).fetchone()
+                    self.assertEqual(row["role"], "citizen")
+                    self.assertEqual(db.execute(
+                        "SELECT COUNT(*) FROM users WHERE role='system_admin'").fetchone()[0], 0)
+
+                os.environ["NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL"] = "initial-admin@example.test"
+                app.bootstrap_admin()
+                app.bootstrap_admin()
+                with app.db_session() as db:
+                    self.assertEqual(db.execute(
+                        "SELECT COUNT(*) FROM users WHERE role='system_admin'").fetchone()[0], 1)
+
+                # A later deployment with different bootstrap values must not
+                # silently create a second admin or rotate the first account.
+                os.environ["NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL"] = "second-admin@example.test"
+                os.environ["NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD"] = "Different-Admin-2026!"
+                app.bootstrap_admin()
+                with app.db_session() as db:
+                    self.assertEqual(db.execute(
+                        "SELECT COUNT(*) FROM users WHERE role='system_admin'").fetchone()[0], 1)
+                    self.assertIsNone(db.execute(
+                        "SELECT 1 FROM users WHERE email='second-admin@example.test'").fetchone())
+            finally:
+                app.DB_PATH, app.UPLOADS_DIR = previous_db, previous_uploads
+                for key, value in previous_env.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
 
     def test_sparse_legacy_migration_preserves_existing_complaint_identity(self):
         previous_db,previous_uploads=app.DB_PATH,app.UPLOADS_DIR

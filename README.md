@@ -33,7 +33,7 @@ Create the first system administrator in a terminal (the password prompt does no
 python server.py create-admin admin@example.test
 ```
 
-Or supply the following environment variables on first startup. An account is created only if that email does not already exist; startup will not reset an existing password:
+Or supply the following environment variables on first startup. The bootstrap creates the initial system administrator only when the database has no system-administrator account. It never promotes an existing citizen or staff account. If the configured email is already in use, startup stops with a clear error; choose a different, unused email. Once an administrator exists, later restarts do not add another account or change its password:
 
 ```text
 NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL
@@ -42,6 +42,8 @@ NAGRIVANTA_BOOTSTRAP_ADMIN_NAME     # optional
 ```
 
 System administrators can create municipal, worker and inspector accounts in the admin portal. Give each person their account credentials through a separate secure channel. This demo does not provide email verification, password recovery, MFA, or forced first-login password reset.
+
+Open the role-aware app at the site root (`/`) or use the `/admin` entry link. Both paths serve the same app; `/admin` is not an access grant or a separate dashboard. The authenticated server-side account role determines the portal. Sign in with the System Administrator account to open **Administration**; a Citizen account remains limited to the Citizen portal, even when using `/admin`. Sign out before switching accounts.
 
 ## Configuration
 
@@ -82,13 +84,15 @@ node --check public/app.js
 python -m py_compile server.py
 ```
 
-The 13 automated API tests cover registration/login/logout, password rotation, origin and CSRF controls, login throttling, role and evidence access, complaint lifecycle, inspection rejection and rework, notifications, configuration, analytics and additive migration. A local Chromium run completed the full citizen → municipal assignment → field repair → inspector approval → citizen resolution flow without browser console errors or failed local responses. This was a one-off environment check, not a committed test dependency.
+The 14 automated API tests cover registration/login/logout, password rotation, origin and CSRF controls, login throttling, role and evidence access, complaint lifecycle, inspection rejection and rework, notifications, configuration, analytics, additive migration, and first-admin bootstrap safety. A local Chromium run completed the full citizen → municipal assignment → field repair → inspector approval → citizen resolution flow without browser console errors or failed local responses. This was a one-off environment check, not a committed test dependency.
 
 ## Render deployment and storage warning
 
-The repository's existing `render.yaml` config is a **Render `free` web service**, build command `echo 'No external dependencies'`, start command `python server.py`, and health check `/api/health`. It does **not** define a persistent disk. A read-only GET to the public health endpoint returned HTTP 200 and identified the running service as `Nagrivanta demo API`; this is the current public deployment, not the local `round2-hardening` branch. The free filesystem is ephemeral, so SQLite and private uploads may be lost on restart/redeploy; durable storage is **not verified or guaranteed** by this configuration.
+The repository's existing `render.yaml` config is a **Render `free` web service**, build command `echo 'No external dependencies'`, start command `python server.py`, and health check `/api/health`. It does **not** define a persistent disk. A read-only health check of the provided Render service returned HTTP 200 and reported `SQLite + private filesystem`; this confirms availability, not durable persistence. The free filesystem is ephemeral, so SQLite and private uploads may be lost on restart/redeploy; durable storage is **not verified or guaranteed** by this configuration.
 
-To demonstrate durable persistence, use a Render service/plan that supports a persistent disk, attach and verify a mount (for example `/var/data`), then set both `DATABASE_PATH=/var/data/nagrivanta.sqlite3` and `UPLOADS_DIR=/var/data/nagrivanta-uploads`. Verify that the paths are writable and survive an actual restart before describing the service as persistent. Keep the bootstrap password in the host's secret settings and remove the bootstrap variables after account creation. No production deployment was performed from this working branch.
+To initialize the live System Administrator, open the `nagrivanta-round2` service in Render → **Environment**, set `NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL` to a new, unused email and set `NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD` as a secret (12–256 characters). Optionally set `NAGRIVANTA_BOOTSTRAP_ADMIN_NAME`. Save and redeploy/restart the service. Then open `/admin` (or the site root), sign in with those credentials, and use **Manage users** to create Municipal Administrator and Field Worker accounts. Remove the bootstrap variables after confirming login; the created account remains in the database. If an administrator already exists, bootstrap is a no-op and does not reset its credentials.
+
+To demonstrate durable persistence, use a Render service/plan that supports a persistent disk, attach and verify a mount (for example `/var/data`), then set both `DATABASE_PATH=/var/data/nagrivanta.sqlite3` and `UPLOADS_DIR=/var/data/nagrivanta-uploads`. Verify that the paths are writable and survive an actual restart before describing the service as persistent. This repository's blueprint remains on the free plan and does not attach a disk; durable persistence is not fixed by this change. No production deployment was performed from this working branch.
 
 ## Limitations and security notes
 
@@ -106,4 +110,4 @@ Use [`docs/DEMO.md`](docs/DEMO.md) for a short end-to-end script. Create staff a
 
 ## Working branch
 
-Changes in this package are on local branch `round2-hardening`. They have **not** been pushed to GitHub or deployed to Render. Review the diff and run the tests before pushing or deploying.
+The focused Render bootstrap changes are on local branch `fix/render-admin-bootstrap`. They have **not** been pushed to GitHub or deployed to Render. Review the diff and run the tests before pushing or deploying.
