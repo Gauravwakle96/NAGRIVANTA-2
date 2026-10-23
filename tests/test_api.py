@@ -326,14 +326,27 @@ class ApiTests(unittest.TestCase):
         self.assertIsNone(metrics["average_resolution_hours"])
         self.assertIn("default 168 hours",metrics["definitions"]["overdue"])
 
+    def test_fresh_database_startup_does_not_seed_demo_reports(self):
+        with app.db_session() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reports").fetchone()[0], 0)
+
     def test_demo_reset_requires_system_admin_and_explicit_flag(self):
-        previous=os.environ.pop("NAGRIVANTA_DEMO_RESET",None)
+        previous=os.environ.get("NAGRIVANTA_DEMO_RESET")
         try:
+            os.environ.pop("NAGRIVANTA_DEMO_RESET",None)
             self.assertEqual(self.request("/api/demo/reset",{},"POST",self.admin)[0],403)
             self.assertEqual(self.request("/api/demo/reset",{},"POST",self.municipal)[0],403)
+            os.environ["NAGRIVANTA_DEMO_RESET"]="1"
+            self.assertEqual(self.request("/api/demo/reset",{},"POST",self.citizen)[0],403)
+            code, data, _ = self.request("/api/demo/reset",{},"POST",self.admin)
+            self.assertEqual(code,200,data)
+            self.assertEqual(len(data["reports"]),4)
+            self.assertTrue(all(report["synthetic"] for report in data["reports"]))
         finally:
             if previous is not None:
                 os.environ["NAGRIVANTA_DEMO_RESET"]=previous
+            else:
+                os.environ.pop("NAGRIVANTA_DEMO_RESET",None)
 
     def test_bootstrap_creates_only_the_first_admin_and_never_promotes_a_citizen(self):
         keys = (

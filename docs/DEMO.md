@@ -4,7 +4,8 @@
 
 1. Run the application and create the first system administrator with `python server.py create-admin <email>` or configure the documented bootstrap secrets on the host. Do not paste credentials into source code or this document.
 2. Sign in to the System Administrator portal. Create one municipal administrator, one field worker and one inspector. Share their passwords securely outside the demo.
-3. Have the field worker and inspector sign in once if you want to show their portals; sign out between accounts. Confirm the app is using synthetic test data only.
+3. If the scenario needs the four sample complaints, enable `NAGRIVANTA_DEMO_RESET=1` only in a disposable demo environment and have the system administrator invoke the protected `POST /api/demo/reset` action. This replaces synthetic reports and is refused if non-synthetic complaints exist. Fresh startup does not seed complaints automatically.
+4. Have the field worker and inspector sign in once if you want to show their portals; sign out between accounts. Confirm the app is using synthetic test data only.
 
 ## Walkthrough
 
@@ -19,4 +20,4 @@
 
 ## Claims to avoid
 
-Do not describe the app as integrated with a real city/authority, claim official heritage locations, claim AI confidence, promise response times, or report social/financial impact based on the four synthetic seed records. Do not enter a real person's home address, faces, sensitive issue photos or emergency reports.
+Do not describe the app as integrated with a real city/authority, claim official heritage locations, claim AI confidence, promise response times, or report social/financial impact based on synthetic demo records. Do not enter a real person's home address, faces, sensitive issue photos or emergency reports.

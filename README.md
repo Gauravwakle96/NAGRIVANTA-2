@@ -25,7 +25,7 @@ Requires Python 3.10+; no third-party Python runtime packages are used.
 python server.py
 ```
 
-Open <http://localhost:8000>. On first start the app creates `nagrivanta.sqlite3`, initializes the catalog and adds four clearly synthetic demo complaints. Citizen accounts can be registered through the UI; public registration cannot create staff or administrator accounts.
+Open <http://localhost:8000>. On first start the app creates `nagrivanta.sqlite3` and initializes the catalog; it does not automatically create complaint records. Citizen accounts can be registered through the UI; public registration cannot create staff or administrator accounts. If a disposable demo environment needs the four sample complaints, a system administrator can explicitly initialize them through `POST /api/demo/reset` after setting `NAGRIVANTA_DEMO_RESET=1`. That operation replaces existing synthetic complaints and refuses to run if non-synthetic complaints exist; do not enable it on a shared or production service.
 
 Create the first system administrator in a terminal (the password prompt does not echo):
 
@@ -56,7 +56,7 @@ Open the role-aware app at the site root (`/`) or use the `/admin` entry link. B
 | `NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD` | Optional initial admin secret; never commit | unset |
 | `NAGRIVANTA_BOOTSTRAP_ADMIN_NAME` | Optional initial admin display name | `System Administrator` |
 | `NAGRIVANTA_COOKIE_SECURE` | Force `Secure` session cookie (`1`/`0`) | inferred from Render/HTTPS proxy |
-| `NAGRIVANTA_DEMO_RESET` | Enable destructive synthetic-demo reset endpoint | disabled |
+| `NAGRIVANTA_DEMO_RESET` | Enable explicit system-admin-only synthetic demo initialization/reset endpoint | disabled |
 
 See [`.env.example`](.env.example). Use distinct, writable database and evidence paths. Both paths must be placed on persistent storage if records must survive host restarts.
 
@@ -84,7 +84,7 @@ node --check public/app.js
 python -m py_compile server.py
 ```
 
-The 14 automated API tests cover registration/login/logout, password rotation, origin and CSRF controls, login throttling, role and evidence access, complaint lifecycle, inspection rejection and rework, notifications, configuration, analytics, additive migration, and first-admin bootstrap safety. A local Chromium run completed the full citizen → municipal assignment → field repair → inspector approval → citizen resolution flow without browser console errors or failed local responses. This was a one-off environment check, not a committed test dependency.
+The automated API tests cover registration/login/logout, password rotation, origin and CSRF controls, login throttling, role and evidence access, complaint lifecycle, inspection rejection and rework, notifications, configuration, analytics, additive migration, startup seeding safety and first-admin bootstrap safety. A local Chromium run completed the full citizen → municipal assignment → field repair → inspector approval → citizen resolution flow without browser console errors or failed local responses. This was a one-off environment check, not a committed test dependency.
 
 ## Render deployment and storage warning
 
@@ -102,7 +102,7 @@ To demonstrate durable persistence, use a Render service/plan that supports a pe
 - Image validation checks declared type and file signatures but does not fully decode, re-encode, strip EXIF, or malware-scan images. Keep uploads small and non-sensitive; add production image processing and retention controls before real use.
 - Login throttling is a lightweight SQLite per-email lockout. A public production deployment needs additional network-aware abuse controls, account recovery, monitoring and incident response.
 - Render free storage is ephemeral; a local SQLite file is persistent only as long as its filesystem is retained.
-- No real-world adoption, response-time, environmental or public-impact statistics are claimed. Analytics are calculated from records in the database; the four seeded records are synthetic.
+- No real-world adoption, response-time, environmental or public-impact statistics are claimed. Analytics are calculated from records in the database; any explicitly initialized demo records are synthetic.
 
 ## Judge demonstration
 
