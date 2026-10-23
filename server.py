@@ -19,6 +19,7 @@ SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
 ROLES = {"citizen", "municipal_admin", "field_worker", "inspector", "system_admin"}
 ADMIN_ROLES = {"municipal_admin", "system_admin"}
+DEPARTMENT_ROLES = {"municipal_admin", "field_worker", "inspector"}
 LEGACY_CATEGORY_GROUPS = {
     "Road damage": "Roads and Public Infrastructure",
     "Water & drainage": "Water Supply and Drainage",
@@ -180,7 +181,8 @@ def init_db():
           id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
           display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
           role TEXT NOT NULL CHECK(role IN ('citizen','municipal_admin','field_worker','inspector','system_admin')),
-          active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          active INTEGER NOT NULL DEFAULT 1, department_id TEXT REFERENCES departments(id),
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         )''')
         # Additive migrations preserve existing report IDs and workflow history.
         columns = {row["name"] for row in db.execute("PRAGMA table_info(reports)")}
@@ -225,6 +227,10 @@ def init_db():
         db.execute('''CREATE TABLE IF NOT EXISTS departments (
           id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1
         )''')
+        user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+        if "department_id" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN department_id TEXT REFERENCES departments(id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_users_department_role ON users(department_id,role,active)")
         db.execute('''CREATE TABLE IF NOT EXISTS issue_categories (
           id TEXT PRIMARY KEY, category TEXT NOT NULL, subcategory TEXT NOT NULL,
           department_id TEXT NOT NULL REFERENCES departments(id),
@@ -298,7 +304,7 @@ def init_db():
                        (detail, suggested, row["id"]))
         # Never create synthetic complaints implicitly during startup. Demo
         # records are initialized only through the protected demo-reset action.
-        db.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (?,?)",(2,now()))
+        db.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (?,?)",(3,now()))
     # Older builds kept data URLs inside the reports table. Move those bytes
     # into private files without changing report IDs, status, or event history.
     migrate_legacy_evidence()
@@ -630,24 +636,39 @@ def normalize_email(value):
     return email
 
 
-def create_user(db, email, display_name, password, role="citizen"):
+def validate_department_assignment(db, role, department_id):
+    if role in DEPARTMENT_ROLES:
+        if not isinstance(department_id,str):
+            raise ValueError("Assign this staff account to an active department.")
+        department = db.execute("SELECT id FROM departments WHERE id=? AND active=1",
+                                (department_id,)).fetchone()
+        if not department:
+            raise ValueError("Assign this staff account to an active department.")
+        return department["id"]
+    if department_id not in (None,""):
+        raise ValueError("Only municipal staff accounts can be assigned to a department.")
+    return None
+
+
+def create_user(db, email, display_name, password, role="citizen", department_id=None):
     email = normalize_email(email)
     password = validate_password(password)
     if role not in ROLES:
         raise ValueError("Choose a supported account role.")
     if not isinstance(display_name, str) or not 2 <= len(display_name.strip()) <= 80:
         raise ValueError("Name must be between 2 and 80 characters.")
+    department_id = validate_department_assignment(db,role,department_id)
     user_id = uuid.uuid4().hex
     timestamp = now()
     try:
-        db.execute("""INSERT INTO users(id,email,display_name,password_hash,role,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?)""",
-          (user_id,email,display_name.strip(),hash_password(password),role,timestamp,timestamp))
+        db.execute("""INSERT INTO users(id,email,display_name,password_hash,role,department_id,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?)""",
+          (user_id,email,display_name.strip(),hash_password(password),role,department_id or None,timestamp,timestamp))
     except sqlite3.IntegrityError as exc:
         if "email" in str(exc).lower():
             raise ValueError("An account with that email already exists.") from exc
         raise
-    return db.execute("SELECT id,email,display_name,role,active,created_at FROM users WHERE id=?",
+    return db.execute("SELECT id,email,display_name,role,active,department_id,created_at FROM users WHERE id=?",
                       (user_id,)).fetchone()
 
 
@@ -663,9 +684,16 @@ def make_session(db, user_id):
     return token, csrf, expires
 
 
-def user_payload(row):
+def user_payload(row, db=None):
+    keys = set(row.keys()) if hasattr(row,"keys") else set(row)
+    department_id = row["department_id"] if "department_id" in keys else None
+    department_name = row["department_name"] if "department_name" in keys else None
+    if department_id and not department_name and db:
+        department = db.execute("SELECT name FROM departments WHERE id=?",(department_id,)).fetchone()
+        department_name = department["name"] if department else None
     return {"id": row["id"], "email": row["email"], "display_name": row["display_name"],
-            "role": row["role"], "active": bool(row["active"]), "created_at": row["created_at"]}
+            "role": row["role"], "active": bool(row["active"]), "department_id": department_id,
+            "department_name": department_name, "created_at": row["created_at"]}
 
 
 def record_audit(db, actor_id, action, entity_type, entity_id=None, details=None):
@@ -782,16 +810,21 @@ def migrate_legacy_evidence():
 
 
 def can_view_report(db,user,row):
-    if user["role"] in ADMIN_ROLES:
+    if user["role"] == "system_admin":
         return True
+    department = row["department"] or row["suggested_department"]
+    in_department = bool(user.get("department_id") and user.get("department_name")
+                         and department == user["department_name"])
     if user["role"] == "citizen":
         return row["owner_id"] == user["id"]
+    if user["role"] == "municipal_admin":
+        return in_department
     if user["role"] == "field_worker":
-        return row["assigned_to"] == user["id"]
+        return row["assigned_to"] == user["id"] and in_department
     if user["role"] == "inspector":
-        return row["status"] == "repair_submitted" or db.execute(
+        return in_department and (row["status"] == "repair_submitted" or db.execute(
             "SELECT 1 FROM inspections WHERE report_id=? AND inspector_id=? LIMIT 1",
-            (row["id"],user["id"])).fetchone() is not None
+            (row["id"],user["id"])).fetchone() is not None)
     return False
 
 
@@ -843,40 +876,52 @@ def validate_coordinates(latitude,longitude):
     return lat,lng
 
 
-def analytics_payload(db):
-    total = db.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
+def analytics_payload(db, department_name=None):
+    report_scope = ""
+    scope_params = ()
+    if department_name is not None:
+        report_scope = " AND COALESCE(NULLIF(r.department,''),NULLIF(r.suggested_department,''))=?"
+        scope_params = (department_name,)
+    total = db.execute("SELECT COUNT(*) FROM reports r WHERE 1=1"+report_scope,
+                       scope_params).fetchone()[0]
     counts = {row["status"]:row["n"] for row in db.execute(
-      "SELECT status,COUNT(*) AS n FROM reports GROUP BY status")}
+      "SELECT r.status,COUNT(*) AS n FROM reports r WHERE 1=1"+report_scope+" GROUP BY r.status",
+      scope_params)}
     resolved = counts.get("verified",0)
     durations = []
-    for row in db.execute("SELECT created_at,updated_at FROM reports WHERE status='verified'"):
+    for row in db.execute("SELECT r.created_at,r.updated_at FROM reports r WHERE r.status='verified'"+report_scope,
+                          scope_params):
         try:
             start = datetime.fromisoformat(row["created_at"])
             end = datetime.fromisoformat(row["updated_at"])
             durations.append(max(0,(end-start).total_seconds()/3600))
         except (ValueError,TypeError):
             continue
-    total_inspections = db.execute("SELECT COUNT(*) FROM inspections").fetchone()[0]
-    rejected = db.execute("SELECT COUNT(*) FROM inspections WHERE approved=0").fetchone()[0]
+    total_inspections = db.execute("""SELECT COUNT(*) FROM inspections i JOIN reports r ON r.id=i.report_id
+      WHERE 1=1""" + report_scope,scope_params).fetchone()[0]
+    rejected = db.execute("""SELECT COUNT(*) FROM inspections i JOIN reports r ON r.id=i.report_id
+      WHERE i.approved=0""" + report_scope,scope_params).fetchone()[0]
     departments = [dict(row) for row in db.execute("""SELECT
-      COALESCE(NULLIF(department,''),NULLIF(suggested_department,''),'Unassigned') AS department,
-      COUNT(*) AS complaint_count FROM reports WHERE status!='verified'
-      GROUP BY department ORDER BY complaint_count DESC,department""")]
+      COALESCE(NULLIF(r.department,''),NULLIF(r.suggested_department,''),'Unassigned') AS department,
+      COUNT(*) AS complaint_count FROM reports r WHERE r.status!='verified'""" + report_scope +
+      " GROUP BY department ORDER BY complaint_count DESC,department",scope_params)]
     overdue = 0
     current = datetime.now(timezone.utc)
     for row in db.execute("""SELECT r.created_at,c.escalation_hours FROM reports r
       LEFT JOIN issue_categories c ON c.category=r.category AND c.subcategory=r.subcategory
-      WHERE r.status!='verified'"""):
+      WHERE r.status!='verified'""" + report_scope,scope_params):
         try:
             created = datetime.fromisoformat(row["created_at"])
             if (current-created).total_seconds() > (row["escalation_hours"] or 168)*3600:
                 overdue += 1
         except (ValueError,TypeError):
             pass
+    high_priority = db.execute("""SELECT COUNT(*) FROM reports r WHERE r.priority>=70
+      AND r.status!='verified'""" + report_scope,scope_params).fetchone()[0]
     return {
       "total":total,"pending":total-resolved,"awaiting_assignment":counts.get("submitted",0),
       "awaiting_inspection":counts.get("repair_submitted",0),
-      "high_priority":db.execute("SELECT COUNT(*) FROM reports WHERE priority>=70 AND status!='verified'").fetchone()[0],
+      "high_priority":high_priority,
       "verified_resolutions":resolved,"resolution_rate":round(resolved*100/total,1) if total else None,
       "average_resolution_hours":round(sum(durations)/len(durations),1) if durations else None,
       "department_workload":departments,"overdue":overdue,
@@ -978,8 +1023,10 @@ class Handler(BaseHTTPRequestHandler):
         token_hash = hashlib.sha256(morsel.value.encode()).hexdigest()
         with db_session() as db:
             row = db.execute("""SELECT s.token_hash,s.csrf_token,s.expires_at,
-              u.id,u.email,u.display_name,u.role,u.active,u.created_at
-              FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?""",(token_hash,)).fetchone()
+              u.id,u.email,u.display_name,u.role,u.active,u.department_id,d.name AS department_name,u.created_at
+              FROM sessions s JOIN users u ON u.id=s.user_id
+              LEFT JOIN departments d ON d.id=u.department_id AND d.active=1
+              WHERE s.token_hash=?""",(token_hash,)).fetchone()
             if not row or not row["active"] or row["expires_at"] <= now():
                 db.execute("DELETE FROM sessions WHERE token_hash=?",(token_hash,))
                 return None
@@ -1054,22 +1101,32 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 return
             with db_session() as db:
-                rows = db.execute("""SELECT id,display_name,email FROM users
-                  WHERE role='field_worker' AND active=1 ORDER BY display_name""").fetchall()
+                if user["role"] == "municipal_admin":
+                    rows = db.execute("""SELECT id,display_name,email FROM users
+                      WHERE role='field_worker' AND active=1 AND department_id=?
+                      ORDER BY display_name""",(user["department_id"] or "",)).fetchall()
+                else:
+                    rows = db.execute("""SELECT id,display_name,email FROM users
+                      WHERE role='field_worker' AND active=1 ORDER BY display_name""").fetchall()
                 return json_response(self,{"workers":[dict(row) for row in rows]})
         if path == "/api/analytics":
             user = self.require_user(ADMIN_ROLES)
             if not user:
                 return
             with db_session() as db:
-                return json_response(self,{"analytics":analytics_payload(db)})
+                scope = user.get("department_name") if user["role"] == "municipal_admin" else None
+                if user["role"] == "municipal_admin" and not scope:
+                    scope = ""
+                return json_response(self,{"analytics":analytics_payload(db,scope)})
         if path == "/api/admin/users":
             user = self.require_user({"system_admin"})
             if not user:
                 return
             with db_session() as db:
-                rows = db.execute("""SELECT id,email,display_name,role,active,created_at
-                  FROM users ORDER BY created_at DESC LIMIT 500""").fetchall()
+                rows = db.execute("""SELECT u.id,u.email,u.display_name,u.role,u.active,u.department_id,
+                  d.name AS department_name,u.created_at FROM users u
+                  LEFT JOIN departments d ON d.id=u.department_id
+                  ORDER BY u.created_at DESC LIMIT 500""").fetchall()
                 return json_response(self,{"users":[user_payload(row) for row in rows]})
         if path == "/api/admin/config":
             user = self.require_user({"system_admin"})
@@ -1149,9 +1206,12 @@ class Handler(BaseHTTPRequestHandler):
                     db.execute("DELETE FROM sessions WHERE user_id=?",(user["id"],))
                     token,csrf,expires = make_session(db,user["id"])
                     record_audit(db,user["id"],"password_changed","user",user["id"])
-                    updated = db.execute("SELECT id,email,display_name,role,active,created_at FROM users WHERE id=?",
-                                          (user["id"],)).fetchone()
-                return json_response(self,{"user":user_payload(updated),"csrf_token":csrf,"expires_at":expires},
+                    updated = db.execute("""SELECT u.id,u.email,u.display_name,u.role,u.active,u.department_id,
+                      d.name AS department_name,u.created_at FROM users u
+                      LEFT JOIN departments d ON d.id=u.department_id WHERE u.id=?""",
+                      (user["id"],)).fetchone()
+                    updated_payload = user_payload(updated)
+                return json_response(self,{"user":updated_payload,"csrf_token":csrf,"expires_at":expires},
                                      headers=self.cookie_headers(token))
             if path == "/api/auth/logout":
                 cookie = SimpleCookie(self.headers.get("Cookie",""))
@@ -1264,7 +1324,7 @@ class Handler(BaseHTTPRequestHandler):
             db.execute("DELETE FROM login_throttles WHERE email=?",(email,))
             token,csrf,expires = make_session(db,row["id"])
             record_audit(db,row["id"],"login","session")
-            user = user_payload(row)
+            user = user_payload(row,db)
         return json_response(self,{"user":user,"csrf_token":csrf,"expires_at":expires},
                              headers=self.cookie_headers(token))
 
@@ -1275,13 +1335,29 @@ class Handler(BaseHTTPRequestHandler):
         if role == "citizen":
             clauses.append("owner_id=?")
             params.append(user["id"])
+        elif role == "municipal_admin":
+            if user.get("department_name"):
+                clauses.append("COALESCE(NULLIF(department,''),NULLIF(suggested_department,''))=?")
+                params.append(user["department_name"])
+            else:
+                clauses.append("1=0")
         elif role == "field_worker":
             clauses.append("assigned_to=?")
             params.append(user["id"])
+            if user.get("department_name"):
+                clauses.append("COALESCE(NULLIF(department,''),NULLIF(suggested_department,''))=?")
+                params.append(user["department_name"])
+            else:
+                clauses.append("1=0")
         elif role == "inspector":
             clauses.append("""(status='repair_submitted' OR EXISTS
               (SELECT 1 FROM inspections i WHERE i.report_id=reports.id AND i.inspector_id=?))""")
             params.append(user["id"])
+            if user.get("department_name"):
+                clauses.append("COALESCE(NULLIF(department,''),NULLIF(suggested_department,''))=?")
+                params.append(user["department_name"])
+            else:
+                clauses.append("1=0")
         query = parse_query(self.path)
         if query.get("status"):
             clauses.append("status=?")
@@ -1392,11 +1468,17 @@ class Handler(BaseHTTPRequestHandler):
                 if r["status"] not in {"submitted","needs_rework"}:
                     raise ValueError("Only submitted or returned issues can be assigned.")
                 department = normalize_department(db,data.get("department","") if isinstance(data.get("department"),str) else "")
+                department_row = db.execute("SELECT id,name FROM departments WHERE name=? AND active=1",
+                                            (department,)).fetchone() if department else None
                 worker_id = data.get("worker_id")
-                worker = db.execute("""SELECT id,display_name FROM users
+                worker = db.execute("""SELECT id,display_name,department_id FROM users
                   WHERE id=? AND role='field_worker' AND active=1""",(worker_id,)).fetchone() if isinstance(worker_id,str) else None
-                if not department or not worker:
+                if not department_row or not worker:
                     raise ValueError("Select an active department and field worker.")
+                if user["role"] == "municipal_admin" and user.get("department_id") != department_row["id"]:
+                    return json_response(self,{"error":"You can assign work only within your authorized department."},403)
+                if worker["department_id"] != department_row["id"]:
+                    return json_response(self,{"error":"The selected field worker is not assigned to this department."},403)
                 crew = worker["display_name"]
                 events.append(event(user["display_name"],"Work order assigned",f"{department} • {crew}"))
                 db.execute("""UPDATE reports SET department=?,crew=?,assigned_to=?,status='assigned',
@@ -1485,11 +1567,14 @@ class Handler(BaseHTTPRequestHandler):
         if role not in ROLES:
             raise ValueError("Choose one of the configured account roles.")
         with db_session() as db:
-            created = create_user(db,data.get("email"),data.get("display_name"),data.get("password"),role)
-            record_audit(db,user["id"],"user_created","user",created["id"],{"role":role})
+            department_id = validate_department_assignment(db,role,data.get("department_id"))
+            created = create_user(db,data.get("email"),data.get("display_name"),data.get("password"),
+                                  role,department_id)
+            record_audit(db,user["id"],"user_created","user",created["id"],
+                         {"role":role,"department_id":department_id})
             notify_user(db,created["id"],None,"account_created","Staff account created",
                         "Your account is ready. Your system administrator will provide sign-in details.")
-            return json_response(self,{"user":user_payload(created)},201)
+            return json_response(self,{"user":user_payload(created,db)},201)
 
     def admin_update_user(self,user,user_id,data):
         with db_session() as db:
@@ -1500,23 +1585,30 @@ class Handler(BaseHTTPRequestHandler):
             active = data.get("active",bool(target["active"]))
             if role not in ROLES or type(active) is not bool:
                 raise ValueError("Use a supported role and boolean account status.")
+            department_id = validate_department_assignment(
+                db,role,data.get("department_id",target["department_id"]))
             if target["id"] == user["id"] and not active:
                 raise ValueError("You cannot deactivate the account currently in use.")
             if target["role"] == "system_admin" and (role != "system_admin" or not active):
                 admins = db.execute("SELECT COUNT(*) FROM users WHERE role='system_admin' AND active=1").fetchone()[0]
                 if admins <= 1:
                     raise ValueError("The last active system administrator cannot be removed.")
-            if target["role"] == "field_worker" and not active:
+            if target["role"] == "field_worker" and (
+                not active or role != "field_worker" or department_id != target["department_id"]
+            ):
                 assigned = db.execute("""SELECT COUNT(*) FROM reports
                   WHERE assigned_to=? AND status NOT IN ('verified')""",(user_id,)).fetchone()[0]
                 if assigned:
-                    raise ValueError("Reassign this worker's open work before deactivating the account.")
-            db.execute("UPDATE users SET role=?,active=?,updated_at=? WHERE id=?",
-                       (role,1 if active else 0,now(),user_id))
-            record_audit(db,user["id"],"user_updated","user",user_id,{"role":role,"active":active})
+                    raise ValueError("Reassign this worker's open work before changing department, role, or access.")
+            db.execute("UPDATE users SET role=?,active=?,department_id=?,updated_at=? WHERE id=?",
+                       (role,1 if active else 0,department_id,now(),user_id))
+            record_audit(db,user["id"],"user_updated","user",user_id,
+                         {"role":role,"active":active,"department_id":department_id})
             notify_user(db,user_id,None,"account_updated","Account access updated",
                         "Your account role or access status was updated by a system administrator.")
-            row = db.execute("SELECT id,email,display_name,role,active,created_at FROM users WHERE id=?",(user_id,)).fetchone()
+            row = db.execute("""SELECT u.id,u.email,u.display_name,u.role,u.active,u.department_id,
+              d.name AS department_name,u.created_at FROM users u
+              LEFT JOIN departments d ON d.id=u.department_id WHERE u.id=?""",(user_id,)).fetchone()
             return json_response(self,{"user":user_payload(row)})
 
     def admin_save_category(self,user,data):
@@ -1579,6 +1671,19 @@ class Handler(BaseHTTPRequestHandler):
                   WHERE department_id=? AND active=1""",(department_id,)).fetchone()[0]
                 if in_use:
                     raise ValueError("Move or deactivate active categories before disabling this department.")
+                staffed = db.execute("SELECT COUNT(*) FROM users WHERE department_id=? AND active=1",
+                                     (department_id,)).fetchone()[0]
+                if staffed:
+                    raise ValueError("Reassign active staff before disabling this department.")
+                department_row = db.execute("SELECT name FROM departments WHERE id=?",
+                                            (department_id,)).fetchone()
+                if department_row:
+                    open_reports = db.execute("""SELECT COUNT(*) FROM reports
+                      WHERE status!='verified' AND
+                      COALESCE(NULLIF(department,''),NULLIF(suggested_department,''))=?""",
+                      (department_row["name"],)).fetchone()[0]
+                    if open_reports:
+                        raise ValueError("Resolve or reassign open complaints before disabling this department.")
             if existing:
                 try:
                     db.execute("UPDATE departments SET name=?,active=? WHERE id=?",

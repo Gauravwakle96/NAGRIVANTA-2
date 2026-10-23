@@ -64,7 +64,7 @@ See [`.env.example`](.env.example). Use distinct, writable database and evidence
 
 The current schema includes `users`, `sessions`, `reports`, `departments`, `issue_categories`, `routing_rules`, `evidence_files`, `repair_submissions`, `inspections`, `notifications`, `audit_events`, `login_throttles` and `schema_migrations`. See [`docs/DATABASE.md`](docs/DATABASE.md).
 
-Startup applies idempotent additive changes and records schema version 2. Existing complaint IDs, report text, statuses and events are preserved. Before deploying this version against any existing database, take a database backup and copy the existing evidence directory; test the upgrade on a copy first. Startup migration is not a substitute for a production backup or rollback plan.
+Startup applies idempotent additive changes and records schema version 3. Existing complaint IDs, report text, statuses and events are preserved. The additive staff-department migration does not infer department assignments; unassigned municipal staff have restricted access until a system administrator assigns an active department. Before deploying this version against any existing database, take a database backup and copy the existing evidence directory; test the upgrade on a copy first. Startup migration is not a substitute for a production backup or rollback plan.
 
 Evidence is limited to PNG/JPEG/WebP and 1 MB per image. Files are saved under generated names outside `public/`, and are served only after checking the requester's report access. Unsupported legacy formats are archived as non-inline attachments where possible.
 
