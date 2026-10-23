@@ -1,5 +1,11 @@
 __pycache__/
 *.py[cod]
-nagrivanta.sqlite3
 *.db
-.DS_Store
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+private_uploads/
+.env
+.env.*
+!.env.example

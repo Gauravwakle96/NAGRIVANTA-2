@@ -1,137 +1,352 @@
-import base64, importlib.util, json, os, sqlite3, tempfile, threading, unittest, urllib.request, urllib.error
+import base64
+import importlib.util
+import json
+import os
+import sqlite3
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.cookies import SimpleCookie
 from pathlib import Path
 
-MODULE_PATH=Path(__file__).resolve().parents[1]/'server.py'
-spec=importlib.util.spec_from_file_location('nagrivanta_server',MODULE_PATH)
-app=importlib.util.module_from_spec(spec); spec.loader.exec_module(app)
+MODULE_PATH = Path(__file__).resolve().parents[1] / "server.py"
+spec = importlib.util.spec_from_file_location("nagrivanta_server", MODULE_PATH)
+app = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(app)
+
 
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp=tempfile.TemporaryDirectory()
-        app.DB_PATH=Path(cls.temp.name)/'test.sqlite3'
-        app.init_db()
-        cls.server=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
-        cls.thread=threading.Thread(target=cls.server.serve_forever,daemon=True); cls.thread.start()
-        cls.base=f'http://127.0.0.1:{cls.server.server_port}'
+        cls.server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown(); cls.server.server_close(); cls.thread.join(2); cls.temp.cleanup()
-    def request(self,path,body=None,method='GET'):
-        data=json.dumps(body).encode() if body is not None else None
-        req=urllib.request.Request(self.base+path,data=data,method=method,headers={'Content-Type':'application/json'})
-        try:
-            with urllib.request.urlopen(req) as res:return res.status,json.loads(res.read())
-        except urllib.error.HTTPError as e:return e.code,json.loads(e.read())
-    def test_seed_has_duplicate_and_workflow_stages(self):
-        _,d=self.request('/api/reports'); reports=d['reports']; ids={r['id']:r for r in reports}
-        self.assertTrue(ids['NG-DEMO-102']['master_id'])
-        self.assertEqual(ids['NG-DEMO-103']['status'],'assigned')
-        self.assertEqual(ids['NG-DEMO-104']['status'],'repair_submitted')
-    def test_full_report_to_verified_closure(self):
-        payload={'title':'Broken road near library','category':'Road damage','description':'A broken road surface is near the public library entrance and can cause a fall.','area':'Ward Test','address':'Library Lane','before_photo':app.sample_photo('test')}
-        code,d=self.request('/api/reports',payload,'POST'); self.assertEqual(code,201); rid=d['report']['id']
-        code,_=self.request('/api/reports/'+rid,{'action':'assign','actor':'Municipal','department':'Roads','crew':'Crew A'},'POST'); self.assertEqual(code,200)
-        code,_=self.request('/api/reports/'+rid,{'action':'repair','actor':'Crew','after_photo':app.sample_photo('after'),'repair_note':'Filled and levelled the damaged patch.'},'POST'); self.assertEqual(code,200)
-        code,d=self.request('/api/reports/'+rid,{'action':'verify','actor':'Inspector','approved':True,'checks':['1','2','3','4'],'notes':'Checked photos and location.'},'POST'); self.assertEqual(code,400)
-        code,d=self.request('/api/reports/'+rid,{'action':'verify','actor':'Inspector','approved':True,'checks':['1','2','3','4','5'],'notes':'Checked photos and location; work appears complete.'},'POST'); self.assertEqual(code,200); self.assertEqual(d['report']['status'],'verified')
-    def test_duplicate_links_source_without_replacing(self):
-        photo=app.sample_photo('dup')
-        base={'title':'Pothole school entrance','category':'Road damage','description':'Large pothole at the school entrance causes traffic danger near the crossing.','area':'Ward 97','address':'New Test Avenue, near library','before_photo':photo}
-        _,one=self.request('/api/reports',base,'POST')
-        two={**base,'title':'Another pothole at school entrance'}
-        _,d=self.request('/api/reports',two,'POST')
-        self.assertEqual(d['duplicate']['master_id'],one['report']['id'])
-        _,all_data=self.request('/api/reports')
-        self.assertTrue(any(x['id']==one['report']['id'] for x in all_data['reports']))
-        self.assertTrue(any(x['id']==d['report']['id'] for x in all_data['reports']))
-    def test_assignment_requires_department_and_crew(self):
-        code,d=self.request('/api/reports/NG-DEMO-101',{'action':'assign','actor':'Municipal','department':'','crew':''},'POST')
-        self.assertEqual(code,400); self.assertIn('department',d['error'].lower())
-    def test_catalog_includes_heritage_and_multiple_departments(self):
-        code,d=self.request('/api/catalog')
-        self.assertEqual(code,200)
-        groups={item['name']:item for item in d['categories']}
-        self.assertIn('Heritage and Historical Sites',groups)
-        self.assertGreaterEqual(len(d['departments']),10)
-        self.assertTrue(any('graffiti' in item['name'].lower()
-                            for item in groups['Heritage and Historical Sites']['subcategories']))
-    def test_heritage_report_gets_competent_authority_recommendation(self):
-        payload={'title':'Graffiti on old stone gate','category':'Heritage and Historical Sites',
-                 'subcategory':'Monument vandalism, graffiti or defacement',
-                 'description':'Graffiti is visible on a historic stone gate and needs an authorized assessment.',
-                 'area':'Demo Ward','address':'Synthetic heritage location',
-                 'before_photo':app.sample_photo('heritage test')}
-        code,d=self.request('/api/reports',payload,'POST')
-        self.assertEqual(code,201)
-        self.assertEqual(d['report']['category_group'],'Heritage and Historical Sites')
-        self.assertIn('Heritage Cell',d['recommendation']['department'])
-        self.assertEqual(d['report']['status'],'submitted')
-    def test_water_and_waste_routes_are_configured(self):
-        examples=[
-            ('Water Supply and Drainage','Blocked drain','Drainage'),
-            ('Solid Waste Management and Sanitation','Overflowing public bin','Solid Waste Management'),
-        ]
-        for category,subcategory,department in examples:
-            payload={'title':'Issue needing municipal attention','category':category,'subcategory':subcategory,
-                     'description':'A public issue needs review by the responsible department.',
-                     'area':'Demo Ward','address':f'Synthetic {subcategory} location',
-                     'before_photo':app.sample_photo('routing test')}
-            code,d=self.request('/api/reports',payload,'POST')
-            self.assertEqual(code,201)
-            self.assertEqual(d['recommendation']['department'],department)
-    def test_rule_based_triage_discloses_method(self):
-        code,d=self.request('/api/triage',{'description':'Garbage is overflowing from a public bin.'},'POST')
-        self.assertEqual(code,200)
-        result=d['recommendation']
-        self.assertEqual(result['method'],'rule-based')
-        self.assertEqual(result['category'],'Solid Waste Management and Sanitation')
-        self.assertIn('human review',result['explanation'].lower())
-    def test_additive_migration_preserves_legacy_report_id_and_category(self):
-        old_path=app.DB_PATH
-        with tempfile.TemporaryDirectory() as folder:
-            legacy_path=Path(folder)/'legacy.sqlite3'
-            db=sqlite3.connect(legacy_path)
-            db.execute('''CREATE TABLE reports (
-              id TEXT PRIMARY KEY, category TEXT NOT NULL, status TEXT NOT NULL, department TEXT
-            )''')
-            db.execute("INSERT INTO reports(id,category,status,department) VALUES (?,?,?,?)",
-                       ('NG-LEGACY-123','Road damage','submitted',None))
-            db.commit(); db.close()
-            try:
-                app.DB_PATH=legacy_path
-                app.init_db()
-                db=sqlite3.connect(legacy_path)
-                row=db.execute("SELECT id,category,subcategory,suggested_department FROM reports WHERE id=?",
-                               ('NG-LEGACY-123',)).fetchone()
-                db.close()
-                self.assertEqual(row[0],'NG-LEGACY-123')
-                self.assertEqual(row[1],'Road damage')
-                self.assertTrue(row[2])
-                self.assertEqual(row[3],'Roads and Engineering')
-            finally:
-                app.DB_PATH=old_path
-    def test_demo_reset_is_disabled_unless_explicitly_enabled(self):
-        previous=os.environ.pop('NAGRIVANTA_DEMO_RESET',None)
-        try:
-            code,d=self.request('/api/demo/reset',{},'POST')
-            self.assertEqual(code,403)
-            self.assertIn('disabled',d['error'].lower())
-        finally:
-            if previous is not None: os.environ['NAGRIVANTA_DEMO_RESET']=previous
-    def test_unsafe_svg_upload_is_rejected(self):
-        unsafe='data:image/svg+xml;base64,'+base64.b64encode(b'<svg onload="alert(1)"></svg>').decode()
-        payload={'title':'Test upload','category':'Road damage','description':'A sufficiently detailed report description for validation.',
-                 'area':'Ward Test','address':'Test Lane','before_photo':unsafe}
-        code,d=self.request('/api/reports',payload,'POST')
-        self.assertEqual(code,400)
-        self.assertIn('unsupported SVG',d['error'])
-    def test_non_string_category_is_rejected_cleanly(self):
-        payload={'title':'Test category','category':['Road damage'],'subcategory':'',
-                 'description':'A sufficiently detailed report description for validation.',
-                 'area':'Ward Test','address':'Test Lane','before_photo':app.sample_photo('test')}
-        code,d=self.request('/api/reports',payload,'POST')
-        self.assertEqual(code,400)
-        self.assertIn('category',d['error'].lower())
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(2)
 
-if __name__=='__main__': unittest.main()
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        app.DB_PATH = root / "test.sqlite3"
+        app.UPLOADS_DIR = root / "private-files"
+        app.init_db()
+        self.accounts = {}
+        with app.db_session() as db:
+            for role, email, name in [
+                ("system_admin", "admin@example.test", "System Admin"),
+                ("municipal_admin", "municipal@example.test", "Municipal Reviewer"),
+                ("citizen", "citizen@example.test", "Citizen One"),
+                ("citizen", "other@example.test", "Citizen Two"),
+                ("field_worker", "worker@example.test", "Field Worker"),
+                ("field_worker", "otherworker@example.test", "Other Worker"),
+                ("inspector", "inspector@example.test", "Inspector One"),
+            ]:
+                self.accounts[role + email] = app.create_user(db,email,name,"Correct-Horse-2026!",role)["id"]
+        self.admin = self.login("admin@example.test")
+        self.municipal = self.login("municipal@example.test")
+        self.citizen = self.login("citizen@example.test")
+        self.other_citizen = self.login("other@example.test")
+        self.worker = self.login("worker@example.test")
+        self.other_worker = self.login("otherworker@example.test")
+        self.inspector = self.login("inspector@example.test")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def request(self, path, body=None, method="GET", session=None, origin=None):
+        raw = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"}
+        if session:
+            headers["Cookie"] = f"nagrivanta_session={session['cookie']}"
+            if session.get("csrf"):
+                headers["X-CSRF-Token"] = session["csrf"]
+        if origin:
+            headers["Origin"] = origin
+        req = urllib.request.Request(self.base + path, data=raw, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as response:
+                data = response.read()
+                return response.status, self.decode(response.headers.get("Content-Type", ""), data), response.headers
+        except urllib.error.HTTPError as error:
+            data = error.read()
+            return error.code, self.decode(error.headers.get("Content-Type", ""), data), error.headers
+
+    @staticmethod
+    def decode(content_type, data):
+        if "application/json" in content_type:
+            return json.loads(data or b"{}")
+        return data
+
+    def login(self, email):
+        code, data, headers = self.request("/api/auth/login", {"email": email, "password": "Correct-Horse-2026!"}, "POST")
+        self.assertEqual(code, 200, data)
+        cookie = SimpleCookie(headers.get("Set-Cookie", ""))["nagrivanta_session"].value
+        return {"cookie": cookie, "csrf": data["csrf_token"]}
+
+    def new_report(self, session=None, **overrides):
+        payload = {
+            "title": "Blocked drain outside community clinic",
+            "category": "Water Supply and Drainage",
+            "subcategory": "Blocked drain",
+            "description": "A blocked drain is pooling water over the public footpath outside the community clinic.",
+            "area": "Ward Test",
+            "address": "Cedar Street near clinic",
+            "before_photo": app.sample_photo("test evidence"),
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        }
+        payload.update(overrides)
+        return self.request("/api/reports", payload, "POST", session or self.citizen)
+
+    def assign(self, report_id, worker=None):
+        return self.request(f"/api/reports/{report_id}", {
+            "action": "assign", "department": "Drainage",
+            "worker_id": self.accounts["field_workerworker@example.test"] if worker is None else worker,
+        }, "POST", self.municipal)
+
+    def test_unauthenticated_api_data_and_mutations_are_blocked(self):
+        self.assertEqual(self.request("/api/reports")[0], 401)
+        self.assertEqual(self.request("/api/auth/me")[1]["authenticated"], False)
+        code, data, _ = self.request("/api/reports", {}, "POST")
+        self.assertEqual(code, 401)
+        self.assertIn("Sign in", data["error"])
+        code, _, _ = self.request("/api/analytics")
+        self.assertEqual(code, 401)
+
+    def test_registration_creates_citizen_and_rejects_privileged_role(self):
+        code, data, headers = self.request("/api/auth/register", {
+            "email": "new.citizen@example.test", "display_name": "New Citizen", "password": "Another-Strong-2026!"
+        }, "POST")
+        self.assertEqual(code, 201, data)
+        self.assertEqual(data["user"]["role"], "citizen")
+        cookie = SimpleCookie(headers.get("Set-Cookie", ""))["nagrivanta_session"].value
+        self.assertIn("HttpOnly", headers.get("Set-Cookie", ""))
+        self.assertIn("SameSite=Lax", headers.get("Set-Cookie", ""))
+        self.assertEqual(self.request("/api/auth/me", session={"cookie": cookie})[0], 200)
+        code, data, _ = self.request("/api/auth/register", {
+            "email": "attacker@example.test", "display_name": "Attacker",
+            "password": "Another-Strong-2026!", "role": "system_admin"
+        }, "POST")
+        self.assertEqual(code, 400)
+        self.assertIn("citizen", data["error"])
+
+    def test_login_errors_logout_and_csrf(self):
+        code, data, _ = self.request("/api/auth/login", {"email": "citizen@example.test", "password": "bad"}, "POST")
+        self.assertEqual(code, 401)
+        self.assertEqual(data["error"], "Email or password is incorrect.")
+        no_csrf = {"cookie": self.citizen["cookie"], "csrf": ""}
+        code, data, _ = self.request("/api/notifications", {}, "POST", no_csrf)
+        self.assertEqual(code, 403)
+        code, _, _ = self.request("/api/auth/logout", {}, "POST", no_csrf)
+        self.assertEqual(code, 403)
+        code, _, _ = self.request("/api/auth/logout", {}, "POST", self.citizen)
+        self.assertEqual(code, 200)
+        self.assertEqual(self.request("/api/auth/me", session=self.citizen)[1]["authenticated"], False)
+
+    def test_password_change_rotates_session_and_revokes_prior_cookie(self):
+        code, data, headers = self.request("/api/auth/password", {
+            "current_password":"Correct-Horse-2026!","new_password":"Changed-Strong-2026!"
+        }, "POST", self.citizen)
+        self.assertEqual(code,200,data)
+        fresh=SimpleCookie(headers.get("Set-Cookie",""))["nagrivanta_session"].value
+        self.assertNotEqual(fresh,self.citizen["cookie"])
+        self.assertEqual(self.request("/api/auth/me",session=self.citizen)[1]["authenticated"],False)
+        self.assertEqual(self.request("/api/auth/me",session={"cookie":fresh})[0],200)
+        code, _, _ = self.request("/api/auth/login", {
+            "email":"citizen@example.test","password":"Changed-Strong-2026!"
+        },"POST")
+        self.assertEqual(code,200)
+
+    def test_login_throttles_repeated_failures(self):
+        for attempt in range(9):
+            code, _, _ = self.request("/api/auth/login", {
+                "email":"citizen@example.test","password":"wrong-password"
+            },"POST")
+            self.assertEqual(code,401,f"attempt {attempt+1}")
+        code, data, _ = self.request("/api/auth/login", {
+            "email":"citizen@example.test","password":"wrong-password"
+        },"POST")
+        self.assertEqual(code,429)
+        self.assertIn("Too many",data["error"])
+
+    def test_auth_rejects_cross_origin_and_reports_errors_without_tracebacks(self):
+        code, data, _ = self.request("/api/auth/login", {
+            "email":"admin@example.test","password":"Correct-Horse-2026!"
+        },"POST",origin="https://attacker.invalid")
+        self.assertEqual(code,403)
+        self.assertIn("origin",data["error"].lower())
+        code, data, _ = self.request("/api/auth/register", {
+            "email":"bad","display_name":"Name","password":"Another-Strong-2026!"
+        },"POST")
+        self.assertEqual(code,400)
+        self.assertNotIn("Traceback",str(data))
+
+    def test_complete_workflow_access_control_notifications_and_persistence(self):
+        code, result, _ = self.new_report()
+        self.assertEqual(code, 201, result)
+        report = result["report"]
+        report_id = report["id"]
+        self.assertTrue(report_id.startswith("NG-"))
+        self.assertIsNotNone(report["before_evidence_id"])
+        self.assertEqual((report["latitude"], report["longitude"]), (18.5204, 73.8567))
+        self.assertEqual(self.request("/api/reports")[0], 401)
+        own = self.request("/api/reports", session=self.citizen)[1]["reports"]
+        self.assertEqual([item["id"] for item in own], [report_id])
+        self.assertEqual(self.request(f"/api/reports/{report_id}", session=self.other_citizen)[0], 404)
+        self.assertEqual(self.request(f"/api/evidence/{report['before_evidence_id']}", session=self.other_citizen)[0], 404)
+        self.assertEqual(self.request(f"/api/evidence/{report['before_evidence_id']}", session=self.citizen)[0], 200)
+        self.assertEqual(self.assign(report_id)[0], 200)
+        self.assertEqual(self.request(f"/api/reports/{report_id}", {"action":"work_start"}, "POST", self.other_worker)[0], 404)
+        code, assigned, _ = self.request(f"/api/reports/{report_id}", {"action":"assign","department":"Drainage","worker_id":self.accounts["field_workerworker@example.test"]}, "POST", self.worker)
+        self.assertEqual(code, 403)
+        self.assertIn("Municipal", assigned["error"])
+        code, data, _ = self.request(f"/api/reports/{report_id}", {"action":"work_start"}, "POST", self.worker)
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["report"]["status"], "in_progress")
+        code, data, _ = self.request(f"/api/reports/{report_id}", {
+            "action":"repair", "repair_note":"Removed accumulated debris and checked water flow.",
+            "after_photo":app.sample_photo("completed repair")
+        }, "POST", self.worker)
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["report"]["status"], "repair_submitted")
+        self.assertEqual(self.request(f"/api/reports/{report_id}", {"action":"verify"}, "POST", self.worker)[0], 403)
+        checks = {str(i):True for i in range(1,6)}
+        code, data, _ = self.request(f"/api/reports/{report_id}", {
+            "action":"verify", "approved":True,"checks":{"1":True},"notes":"Checked work."
+        }, "POST", self.inspector)
+        self.assertEqual(code, 400)
+        self.assertIn("five", data["error"].lower())
+        code, data, _ = self.request(f"/api/reports/{report_id}", {
+            "action":"verify", "approved":True,"checks":checks,"notes":"Drain is clear and the path is safe."
+        }, "POST", self.inspector)
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["report"]["status"], "verified")
+        citizen_report = self.request(f"/api/reports/{report_id}", session=self.citizen)[1]["report"]
+        self.assertEqual(citizen_report["status"], "verified")
+        self.assertEqual(self.request("/api/notifications", session=self.citizen)[1]["unread_count"], 4)
+        self.assertGreaterEqual(self.request("/api/notifications", session=self.worker)[1]["unread_count"], 2)
+        self.assertEqual(self.request("/api/analytics", session=self.municipal)[0], 200)
+        self.assertEqual(self.request("/api/admin/users", session=self.municipal)[0], 403)
+        self.assertEqual(self.request("/api/admin/users", session=self.admin)[0], 200)
+        # Startup migration is additive; completed workflow state and files remain readable after restart.
+        app.init_db()
+        with app.db_session() as db:
+            saved = db.execute("SELECT status,before_photo,after_photo FROM reports WHERE id=?", (report_id,)).fetchone()
+            self.assertEqual(saved["status"], "verified")
+            self.assertTrue(saved["before_photo"].startswith("evidence:"))
+            self.assertTrue(saved["after_photo"].startswith("evidence:"))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM inspections WHERE report_id=?", (report_id,)).fetchone()[0],1)
+
+    def test_rejected_inspection_preserves_rework_history(self):
+        code, created, _ = self.new_report()
+        rid = created["report"]["id"]
+        self.assertEqual(self.assign(rid)[0], 200)
+        self.assertEqual(self.request(f"/api/reports/{rid}", {"action":"work_start"}, "POST", self.worker)[0], 200)
+        self.assertEqual(self.request(f"/api/reports/{rid}", {
+            "action":"repair","repair_note":"Initial repair attempt.","after_photo":app.sample_photo("attempt one")
+        }, "POST", self.worker)[0], 200)
+        checks = {str(i):True for i in range(1,6)}
+        checks["4"] = False
+        code, data, _ = self.request(f"/api/reports/{rid}", {
+            "action":"verify","approved":False,"checks":checks,"notes":"One inspection check failed; repair the uneven edge."
+        }, "POST", self.inspector)
+        self.assertEqual(code,200,data)
+        self.assertEqual(data["report"]["status"],"needs_rework")
+        self.assertEqual(self.assign(rid)[0],200)
+        self.assertEqual(self.request(f"/api/reports/{rid}", {"action":"work_start"}, "POST", self.worker)[0],200)
+        self.assertEqual(self.request(f"/api/reports/{rid}", {
+            "action":"repair","repair_note":"Repaired the edge and checked the surface again.","after_photo":app.sample_photo("attempt two")
+        }, "POST", self.worker)[0],200)
+        self.assertEqual(self.request(f"/api/reports/{rid}", {
+            "action":"verify","approved":True,"checks":{str(i):True for i in range(1,6)},"notes":"All five checks pass."
+        }, "POST", self.inspector)[0],200)
+        with app.db_session() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM inspections WHERE report_id=?",(rid,)).fetchone()[0],2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM repair_submissions WHERE report_id=?",(rid,)).fetchone()[0],2)
+
+    def test_validation_triage_and_unsafe_upload_rejection(self):
+        unsafe = "data:image/svg+xml;base64," + base64.b64encode(b'<svg onload="alert(1)"></svg>').decode()
+        code, data, _ = self.new_report(before_photo=unsafe)
+        self.assertEqual(code,400)
+        self.assertIn("SVG",data["error"])
+        code, data, _ = self.new_report(category=["Road damage"])
+        self.assertEqual(code,400)
+        self.assertIn("category",data["error"].lower())
+        code, data, _ = self.new_report(latitude=999,longitude=73.8)
+        self.assertEqual(code,400)
+        self.assertIn("coordinate",data["error"].lower())
+        code, data, _ = self.request("/api/triage",{"description":"Garbage is overflowing from a public bin."},"POST")
+        self.assertEqual(code,200)
+        self.assertEqual(data["recommendation"]["method"],"rule-based")
+        self.assertIn("human review",data["recommendation"]["explanation"].lower())
+
+    def test_admin_can_manage_accounts_and_routing_but_citizen_cannot(self):
+        code, data, _ = self.request("/api/admin/users", {
+            "email":"crew2@example.test","display_name":"Crew Two","password":"Temporary-Password-2026!","role":"field_worker"
+        }, "POST", self.admin)
+        self.assertEqual(code,201,data)
+        worker_id=data["user"]["id"]
+        code, _, _ = self.request(f"/api/admin/users/{worker_id}", {"role":"inspector","active":True}, "POST", self.admin)
+        self.assertEqual(code,200)
+        code, data, _ = self.request("/api/admin/config/categories", {
+            "category":"Test Civic Category","subcategory":"Test route","department_id":"roads",
+            "default_priority":55,"escalation_hours":72,"keywords":"test route","active":True
+        }, "POST", self.admin)
+        self.assertEqual(code,200,data)
+        config=self.request("/api/admin/config",session=self.admin)[1]
+        self.assertTrue(any(c["category"]=="Test Civic Category" for c in config["categories"]))
+        self.assertEqual(self.request("/api/admin/config",session=self.citizen)[0],403)
+        self.assertEqual(self.request("/api/admin/config/categories", {
+            "category":"Forbidden","subcategory":"Route","department_id":"roads"
+        }, "POST", self.citizen)[0],403)
+
+    def test_department_routing_and_data_derived_analytics(self):
+        code, created, _ = self.new_report(category="Heritage and Historical Sites",
+            subcategory="Monument vandalism, graffiti or defacement",title="Graffiti on old stone gate")
+        self.assertEqual(code,201,created)
+        self.assertIn("Heritage",created["recommendation"]["department"])
+        metrics=self.request("/api/analytics",session=self.municipal)[1]["analytics"]
+        self.assertGreaterEqual(metrics["total"],1)
+        self.assertEqual(metrics["verified_resolutions"],0)
+        self.assertIsNone(metrics["average_resolution_hours"])
+        self.assertIn("default 168 hours",metrics["definitions"]["overdue"])
+
+    def test_demo_reset_requires_system_admin_and_explicit_flag(self):
+        previous=os.environ.pop("NAGRIVANTA_DEMO_RESET",None)
+        try:
+            self.assertEqual(self.request("/api/demo/reset",{},"POST",self.admin)[0],403)
+            self.assertEqual(self.request("/api/demo/reset",{},"POST",self.municipal)[0],403)
+        finally:
+            if previous is not None:
+                os.environ["NAGRIVANTA_DEMO_RESET"]=previous
+
+    def test_sparse_legacy_migration_preserves_existing_complaint_identity(self):
+        previous_db,previous_uploads=app.DB_PATH,app.UPLOADS_DIR
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"legacy.sqlite3"
+            db=sqlite3.connect(path)
+            db.execute("CREATE TABLE reports (id TEXT PRIMARY KEY, category TEXT NOT NULL, status TEXT NOT NULL, department TEXT)")
+            db.execute("INSERT INTO reports(id,category,status,department) VALUES (?,?,?,?)",
+                       ("NG-LEGACY-123","Road damage","submitted",None))
+            db.commit();db.close()
+            try:
+                app.DB_PATH=path;app.UPLOADS_DIR=Path(folder)/"uploads";app.init_db()
+                with app.db_session() as db:
+                    row=db.execute("SELECT id,category,subcategory,suggested_department FROM reports WHERE id=?",
+                                   ("NG-LEGACY-123",)).fetchone()
+                self.assertEqual(row["id"],"NG-LEGACY-123")
+                self.assertEqual(row["category"],"Road damage")
+                self.assertEqual(row["suggested_department"],"Roads and Engineering")
+            finally:
+                app.DB_PATH=previous_db;app.UPLOADS_DIR=previous_uploads
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

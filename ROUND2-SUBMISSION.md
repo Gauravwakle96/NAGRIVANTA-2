@@ -1,47 +1,44 @@
-# Nagrivanta — Round 2 project update
+# Nagrivanta — Round 2 implementation update
 
 ## Project summary
 
-Nagrivanta is a synthetic-data civic workflow prototype connecting citizen reports to a suggested municipal department, assigned work, field evidence and a separate human inspection decision.
+Nagrivanta is a civic issue-management demo connecting citizen reports to a municipal assignment, field repair evidence and a separate inspection decision. It uses synthetic seed records and is not connected to a real municipal or heritage authority.
 
-## Working project and source
+## Implemented in this working branch
 
-- Working demo: https://nagrivanta-round2.onrender.com/
-- Source repository: https://github.com/Gauravwakle96/NAGRIVANTA-2
+- Server-side registration, login, logout, password change and role checks for citizen, municipal administrator, field worker, inspector and system administrator.
+- PBKDF2 password hashes, server-side session records, 12-hour expiry, HttpOnly/SameSite cookies, production Secure-cookie behavior, CSRF/origin controls and email-keyed failed-login throttling.
+- Five responsive role-oriented portals with authenticated navigation and protected APIs.
+- Citizen-owned complaint submission/tracking, unique issue IDs, optional coordinates and private image evidence.
+- Municipal review, specific worker assignment, and database-backed operational analytics.
+- Assigned-worker-only work start and repair submission; append-only repair and inspection records; inspector-only five-check approval/rework decisions.
+- Role-targeted in-app notifications, unread/read states and administrative audit events.
+- System administrator user/role controls, department/category/routing configuration, escalation thresholds, notification metrics and audit view.
+- Rule-based category/keyword suggestions with human-review disclosure.
+- Heritage Watch map/list using submitted complaint coordinates only, with status/priority filtering and list fallback.
+- Additive database migrations, legacy evidence migration to private storage, indexes, health endpoint and updated documentation.
 
-The published URL and repository should be rechecked after the updated source is deployed. The source changes in this package are not automatically published to GitHub or Render.
+## Tests run
 
-## Completed features in the current code
+- `python -m unittest discover -s tests -v` — 13 API tests passed on the last complete run. Rerun after any further changes.
+- `node --check public/app.js` — passed on the last syntax check.
+- `python -m py_compile server.py` — passed on the last syntax check.
+- Chromium local workflow — the full citizen → municipal assignment → field repair → inspector approval → citizen resolution flow succeeded with no browser console errors or failed local responses.
 
-1. Citizen report form with description, location and evidence, generating a unique issue ID.
-2. Database-seeded multi-department categories and subcategories, including roads, heritage, water/drainage, waste, gardens/environment, electrical, health, encroachment, fire/disaster and public facilities.
-3. Configured department suggestions and a keyword-based triage fallback, labelled rule-based and requiring human review.
-4. Duplicate grouping preserves original source reports and evidence.
-5. Municipal assignment, crew repair evidence and a separate inspector decision.
-6. Heritage Watch list and a heritage-specific review checklist; no legal status or damage is automatically asserted.
-7. Additive schema migration preserves existing report IDs and history.
+Test results apply to the local working copy and temporary database only. They do not verify the public Render deployment.
 
-## Technology
+## Deployment / data caveat
 
-- HTML, CSS and vanilla JavaScript.
-- Python standard-library HTTP/JSON API.
-- SQLite (`sqlite3`) with additive migration for department/category/routing configuration.
-- Rule-based classification, priority and duplicate recommendations; no trained AI claim.
+The existing `render.yaml` declares a Render free web service and does not attach a persistent disk. A read-only GET to the public health endpoint returned HTTP 200 and identified the running build as the existing `Nagrivanta demo API`; this working branch is not deployed. No GitHub push or Render deploy was performed. SQLite and evidence retention across Render restart/redeploy is not verified and must not be claimed. Use an eligible persistent disk for both database and uploads, back up the current production database first, and test the additive migration against a copy before rollout.
 
-## Round 1 plan changes
+## Known limitations
 
-The original plan named React/TypeScript/Vite and FastAPI/Pydantic/SQLAlchemy. The existing dependency-light UI and Python standard-library API were retained. The multi-department catalog and rule-based route suggestions extend the workflow without claiming a live municipal integration.
+- This is still a hackathon-scale Python `http.server` application, not a production-certified municipal service.
+- No email/SMS/WhatsApp/push, MFA, email verification, password recovery, first-login reset, image re-encoding/EXIF removal, or malware scanning is configured.
+- Map tiles come from OpenStreetMap and show reports only; no verified heritage asset dataset exists.
+- Category names, sample departments, priority and escalation defaults are illustrative. The seeded records are synthetic.
+- Review `docs/SECURITY.md`, `docs/DATABASE.md`, `docs/API.md` and the root README before demonstrating or deploying.
 
-## Three substantial Round 3 improvements
+## Working copy
 
-1. Secure identity, server-side role permissions, privacy controls and safe evidence storage.
-2. Authorized geospatial data integration, ward-aware matching and a provenance-backed Heritage Watch map.
-3. End-to-end reliability, accessibility, multilingual reporting, offline/resilient uploads and measured evaluation.
-
-## Limitations / disclosure
-
-This is a prototype using synthetic records. The four role views remain demo navigation tabs and are **not authentication or access control**. The API is not suitable for real citizen data. Department assignments and priorities are illustrative, not verified PMC commitments. No municipal API, official heritage registry, map provider, live identity system or trained AI model is integrated. Render/SQLite persistence must be verified before claiming durable storage. Do not submit real personal or sensitive information.
-
-## Verification
-
-After this code update, run `python -m unittest discover -s tests -v` and `node --check public/app.js`. Report only the test results actually observed for the final version.
+Local branch: `round2-hardening`. Changes have not been pushed to the source repository or deployed to the linked service.

@@ -1,74 +1,109 @@
-# Nagrivanta — Multi-department civic workflow demo
+# Nagrivanta — Civic Governance Demo
 
-Nagrivanta is a synthetic-data prototype for a civic report → triage recommendation → department assignment → field evidence → human inspection workflow. It now includes a database-seeded multi-department issue catalog and a Heritage Watch list. It is **not connected to PMC or another municipal system** and is not ready for real citizen records.
+Nagrivanta is a synthetic-data civic issue workflow: citizens report an issue, staff review a transparent routing suggestion, a municipal administrator assigns work, a field worker submits repair evidence, and an inspector approves or returns the work. The application is **not connected to a municipal authority, official heritage register, or live government system**. Do not use it to submit emergencies or sensitive real-world records.
+
+## What is implemented
+
+- Citizen registration, sign-in/sign-out, password changes, PBKDF2 password hashing, opaque server-side sessions, 12-hour session expiry, CSRF tokens and origin checks.
+- Five server-authorized roles: citizen, municipal administrator, field worker, inspector and system administrator.
+- Role-specific responsive portals; backend authorization is enforced independently of the UI.
+- Complaint submission, unique tracking IDs, optional coordinates, report timelines, rule-based triage and configured department suggestions.
+- Work assignment to an active field-worker account, work start, secure completion evidence, five-check inspection, rejection/rework and verified closure.
+- Private image files with database metadata and permission-checked evidence routes; no new evidence data URLs are stored in complaint rows.
+- In-app notifications targeted to relevant accounts, read/unread state, audit events, user/department/category/routing configuration.
+- Heritage Watch map and list backed only by submitted heritage complaints that have coordinates. It does not show official heritage assets.
+- Database-derived queue metrics, resolution times, rework and inspection rates, department workload and configurable escalation thresholds.
+- Additive SQLite startup migrations that preserve existing report IDs and workflow events. Old data-URL evidence is migrated to private storage where it can be decoded and is kept non-inline if its format is not a supported raster image.
+
+Routing and priority are deterministic rules, not a trained AI model. Recommendations are explainable and require human review. Priority values and seeded department names are illustrative, not official service commitments.
 
 ## Run locally
 
-Requirements: Python 3.10+; runtime uses only the standard library.
+Requires Python 3.10+; no third-party Python runtime packages are used.
 
 ```bash
 python server.py
 ```
 
-Open <http://localhost:8000>. SQLite is created at `nagrivanta.sqlite3`; on first run, four synthetic demo reports and the catalog are seeded. Set a different database path with `DATABASE_PATH=/path/to/nagrivanta.sqlite3`.
+Open <http://localhost:8000>. On first start the app creates `nagrivanta.sqlite3`, initializes the catalog and adds four clearly synthetic demo complaints. Citizen accounts can be registered through the UI; public registration cannot create staff or administrator accounts.
 
-To expose the reset button for a disposable synthetic demo only:
+Create the first system administrator in a terminal (the password prompt does not echo):
 
 ```bash
-NAGRIVANTA_DEMO_RESET=1 python server.py
+python server.py create-admin admin@example.test
 ```
 
-Reset is disabled by default so a public deployment cannot delete added records through the demo control.
+Or supply the following environment variables on first startup. An account is created only if that email does not already exist; startup will not reset an existing password:
 
-## Judge walkthrough
+```text
+NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL
+NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD  # 12+ characters; keep in the host's secret manager
+NAGRIVANTA_BOOTSTRAP_ADMIN_NAME     # optional
+```
 
-1. Open **Citizen**, choose a department area and subcategory, and use the sample evidence button.
-2. Try **Suggest category (rule-based demo)** with a description such as “Garbage is overflowing from a public bin.” Review the suggestion; it is not an AI model or an official decision.
-3. Submit the report. Its recommended department is derived from the configured catalog; an operator can choose another active department during assignment.
-4. Use **Municipal**, **Field crew**, and **Inspector** to complete the assignment, repair-evidence and human-inspection stages.
-5. Use **Heritage watch** to review reported heritage-category cases. It is a list only; no official heritage register or map is connected.
-6. Use existing synthetic duplicate samples `NG-DEMO-101` and `NG-DEMO-102` to see linked reports remain separate records.
+System administrators can create municipal, worker and inspector accounts in the admin portal. Give each person their account credentials through a separate secure channel. This demo does not provide email verification, password recovery, MFA, or forced first-login password reset.
 
-The demo role switcher is for walkthroughs only; it is **not authentication or access control**. Do not expose real personal or municipal data through this build.
+## Configuration
 
-## Implemented in this upgrade
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `PORT` | HTTP listening port | `8000` |
+| `DATABASE_PATH` | SQLite database file | `./nagrivanta.sqlite3` |
+| `UPLOADS_DIR` | Private evidence directory (must not be under `public/`) | `./private_uploads` |
+| `NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL` | Optional one-time initial admin email | unset |
+| `NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD` | Optional initial admin secret; never commit | unset |
+| `NAGRIVANTA_BOOTSTRAP_ADMIN_NAME` | Optional initial admin display name | `System Administrator` |
+| `NAGRIVANTA_COOKIE_SECURE` | Force `Secure` session cookie (`1`/`0`) | inferred from Render/HTTPS proxy |
+| `NAGRIVANTA_DEMO_RESET` | Enable destructive synthetic-demo reset endpoint | disabled |
 
-- Additive SQLite migration adds `subcategory`, `suggested_department`, and `synthetic` columns without changing existing complaint IDs or deleting reports.
-- Database tables for `departments`, `issue_categories`, and `routing_rules`, seeded with configurable multi-department categories and proposed routing defaults.
-- Citizen form loads the category/subcategory catalog from the API and displays a suggested department.
-- Legacy category names (`Road damage`, `Water & drainage`, `Streetlight`, `Waste`, `Other`) remain accepted by the existing report API and are mapped to the expanded category groups.
-- Water, waste, heritage and other department recommendations are exposed in a transparent response; routing and priority defaults are demo configuration, not verified municipal service commitments.
-- Keyword-overlap triage endpoint (`POST /api/triage`) is explicitly labelled **rule-based** and returns an explanation without a confidence percentage.
-- Heritage Watch list and a heritage-oriented five-item inspection checklist; reports remain unverified allegations until assessed by authorized personnel.
-- Emergency notice: the ordinary report form is not an emergency response channel.
-- Original duplicate, assignment, repair-evidence and inspector-closure workflow retained.
+See [`.env.example`](.env.example). Use distinct, writable database and evidence paths. Both paths must be placed on persistent storage if records must survive host restarts.
 
-## API
+## Database, evidence and migration
 
-- `GET /api/health` — health check.
-- `GET /api/catalog` — active departments and category/subcategory routing defaults.
-- `POST /api/triage` — transparent keyword-rule suggestion; not trained AI.
-- `GET /api/reports`, `GET /api/reports/{id}`, `POST /api/reports`, `POST /api/reports/{id}` — existing demo report workflow.
-- `POST /api/demo/reset` — resets to synthetic seed records only when `NAGRIVANTA_DEMO_RESET=1`; disabled by default.
+The current schema includes `users`, `sessions`, `reports`, `departments`, `issue_categories`, `routing_rules`, `evidence_files`, `repair_submissions`, `inspections`, `notifications`, `audit_events`, `login_throttles` and `schema_migrations`. See [`docs/DATABASE.md`](docs/DATABASE.md).
 
-## Data and configuration
+Startup applies idempotent additive changes and records schema version 2. Existing complaint IDs, report text, statuses and events are preserved. Before deploying this version against any existing database, take a database backup and copy the existing evidence directory; test the upgrade on a copy first. Startup migration is not a substitute for a production backup or rollback plan.
 
-The seeded department names and routing rules are **proposed examples**, not confirmed PMC department assignments. No PMC data, Open Data API, live municipal service, official heritage register, map provider, external AI, SMS, identity provider, or trained model is integrated. The official Open Data reference should be reviewed for its current dataset/API documentation before building an importer; this app does not scrape or assume that a departments page is a data API.
+Evidence is limited to PNG/JPEG/WebP and 1 MB per image. Files are saved under generated names outside `public/`, and are served only after checking the requester's report access. Unsupported legacy formats are archived as non-inline attachments where possible.
 
-Priority scores are illustrative heuristics, not measured outcomes. The rule-based suggestion is not trained AI, and all routing/classification decisions require human review.
+## API and roles
 
-## Security and deployment limitations
+See [`docs/API.md`](docs/API.md) for endpoint shapes and CSRF/session requirements. The main state transitions are:
 
-- The current four-role UI is a demo role switcher, **not server-side role-based authentication**. API routes are not protected by user identity. Use synthetic records only; do not deploy for real citizen use.
-- The default SQLite database is a local file. Render free services may not retain filesystem writes across redeploys/restarts unless persistent storage is explicitly configured. Do not claim durable storage without verifying the deployment plan.
-- Uploaded demo evidence is stored as data URLs in SQLite. Production use needs a reviewed file-storage strategy, access control, retention policy, upload validation and privacy/security review.
-- No credentials or external integrations are required. Do not add secrets to Git.
+`submitted → assigned → in_progress → repair_submitted → verified`
 
-## Tests
+An inspector can return a repair to `needs_rework`; municipal staff reassign it, the worker starts another attempt, and each repair and inspection remains in history. Citizens see only their own complaints; workers see their assignments; inspectors see the inspection queue and records they inspected; municipal administrators see the operational queue; system administrators manage accounts and configuration.
+
+## Tests and checks
 
 ```bash
 python -m unittest discover -s tests -v
 node --check public/app.js
+python -m py_compile server.py
 ```
 
-The API tests use an isolated temporary SQLite database and cover the existing workflow plus catalog, heritage routing, waste/water routing and rule-based triage. Passing tests do not establish production security or real-world model performance.
+The 13 automated API tests cover registration/login/logout, password rotation, origin and CSRF controls, login throttling, role and evidence access, complaint lifecycle, inspection rejection and rework, notifications, configuration, analytics and additive migration. A local Chromium run completed the full citizen → municipal assignment → field repair → inspector approval → citizen resolution flow without browser console errors or failed local responses. This was a one-off environment check, not a committed test dependency.
+
+## Render deployment and storage warning
+
+The repository's existing `render.yaml` config is a **Render `free` web service**, build command `echo 'No external dependencies'`, start command `python server.py`, and health check `/api/health`. It does **not** define a persistent disk. A read-only GET to the public health endpoint returned HTTP 200 and identified the running service as `Nagrivanta demo API`; this is the current public deployment, not the local `round2-hardening` branch. The free filesystem is ephemeral, so SQLite and private uploads may be lost on restart/redeploy; durable storage is **not verified or guaranteed** by this configuration.
+
+To demonstrate durable persistence, use a Render service/plan that supports a persistent disk, attach and verify a mount (for example `/var/data`), then set both `DATABASE_PATH=/var/data/nagrivanta.sqlite3` and `UPLOADS_DIR=/var/data/nagrivanta-uploads`. Verify that the paths are writable and survive an actual restart before describing the service as persistent. Keep the bootstrap password in the host's secret settings and remove the bootstrap variables after account creation. No production deployment was performed from this working branch.
+
+## Limitations and security notes
+
+- This standard-library `http.server` app is a hackathon/demo implementation, not a production-reviewed municipal service. Use synthetic data only until a security, privacy, operational and legal review is complete.
+- In-app notifications are persisted; email, SMS, WhatsApp, push, identity-provider and government integrations are not configured.
+- The map uses the Leaflet CDN and OpenStreetMap tiles; map pins represent submitted complaint coordinates, never verified heritage assets.
+- Image validation checks declared type and file signatures but does not fully decode, re-encode, strip EXIF, or malware-scan images. Keep uploads small and non-sensitive; add production image processing and retention controls before real use.
+- Login throttling is a lightweight SQLite per-email lockout. A public production deployment needs additional network-aware abuse controls, account recovery, monitoring and incident response.
+- Render free storage is ephemeral; a local SQLite file is persistent only as long as its filesystem is retained.
+- No real-world adoption, response-time, environmental or public-impact statistics are claimed. Analytics are calculated from records in the database; the four seeded records are synthetic.
+
+## Judge demonstration
+
+Use [`docs/DEMO.md`](docs/DEMO.md) for a short end-to-end script. Create staff accounts first, register a citizen, submit a synthetic report, assign it, show repair evidence, inspect all five checks, and confirm the citizen's status and notification. For Heritage Watch, enter coordinates only for a clearly labelled test location; missing coordinates stay in the report list and are not invented.
+
+## Working branch
+
+Changes in this package are on local branch `round2-hardening`. They have **not** been pushed to GitHub or deployed to Render. Review the diff and run the tests before pushing or deploying.
