@@ -25,7 +25,7 @@ For authenticated state-changing requests, send the CSRF token from login/regist
 - `GET /api/reports/{id}` — authorized report detail with permitted evidence references, timeline and repair/inspection history.
 - `GET /api/evidence/{evidence_id}` — authorization-checked private evidence. Unauthorized and unknown files both return 404.
 - `POST /api/reports/{id}` — action field selects a server-validated transition:
-  - `{action:"assign", department, worker_id}` — municipal/system admin only; must select an active configured department and active field worker.
+  - `{action:"assign", department, worker_id}` — municipal/system admin only; must select an active configured department and active field worker. Municipal administrators may assign only within their own active department, and the selected worker must belong to that same department.
   - `{action:"work_start"}` — assigned field worker only; `assigned|needs_rework → in_progress`.
   - `{action:"repair", repair_note, after_photo}` — assigned worker only; `in_progress → repair_submitted`; evidence and each repair attempt are saved.
   - `{action:"verify", approved, checks:{"1":true,...,"5":true}, notes}` — inspector only; every check must be a boolean. Approval requires all true; rejection requires at least one false plus notes.
@@ -36,9 +36,9 @@ Statuses: `submitted`, `assigned`, `in_progress`, `repair_submitted`, `needs_rew
 
 - `GET /api/notifications` — current user's notifications and unread count.
 - `POST /api/notifications/{id}` — mark that recipient's notification read.
-- `GET /api/workers` — municipal/system staff; active field-worker list for assignment.
-- `GET /api/analytics` — municipal/system staff; actual database metrics and definitions.
-- `GET /api/admin/users`, `POST /api/admin/users`, `POST /api/admin/users/{id}` — system administrator only; list/create/update role and active state.
+- `GET /api/workers` — municipal/system staff; active field-worker list for assignment, scoped to a municipal administrator's department.
+- `GET /api/analytics` — municipal/system staff; actual database metrics and definitions, scoped to a municipal administrator's department.
+- `GET /api/admin/users`, `POST /api/admin/users`, `POST /api/admin/users/{id}` — system administrator only; list/create/update role, active state, and department assignment.
 - `GET /api/admin/config` — system administrator only; configured categories/departments.
 - `POST /api/admin/config/categories` — create/update category, subcategory, department, priority, keywords, active status and escalation hours.
 - `POST /api/admin/config/departments` — create/update department.

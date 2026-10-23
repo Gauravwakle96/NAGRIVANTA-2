@@ -4,6 +4,7 @@
 
 - Password hashes use PBKDF2-HMAC-SHA256 with random salts and 310,000 iterations; passwords are never stored or returned in plaintext.
 - Public registration can create only citizen accounts. Privileged account creation and role changes require an active system administrator. The last active system administrator cannot be removed.
+- Municipal administrators, field workers, and inspectors have explicit department assignments. Municipal administrators are scoped to their department's reports, workers, assignment actions, and analytics; worker/inspector report access is department-checked server-side. Legacy department-scoped accounts without an active assignment fail closed until a system administrator assigns them.
 - Opaque random session cookies are stored server-side by token hash, HttpOnly, SameSite=Lax, 12-hour expiry, Secure on Render/HTTPS. Logout deletes the session; password change revokes all existing sessions before creating a replacement.
 - Failed sign-in attempts are throttled by normalized email. This is a lightweight demo control, not a full abuse-management system.
 - CSRF tokens are required for authenticated mutations; supplied `Origin` headers must match the host. No CORS allowlist or wildcard is emitted.

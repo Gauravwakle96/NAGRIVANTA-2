@@ -39,16 +39,17 @@ class ApiTests(unittest.TestCase):
         app.init_db()
         self.accounts = {}
         with app.db_session() as db:
-            for role, email, name in [
-                ("system_admin", "admin@example.test", "System Admin"),
-                ("municipal_admin", "municipal@example.test", "Municipal Reviewer"),
-                ("citizen", "citizen@example.test", "Citizen One"),
-                ("citizen", "other@example.test", "Citizen Two"),
-                ("field_worker", "worker@example.test", "Field Worker"),
-                ("field_worker", "otherworker@example.test", "Other Worker"),
-                ("inspector", "inspector@example.test", "Inspector One"),
+            for role, email, name, department_id in [
+                ("system_admin", "admin@example.test", "System Admin", None),
+                ("municipal_admin", "municipal@example.test", "Municipal Reviewer", "drainage"),
+                ("citizen", "citizen@example.test", "Citizen One", None),
+                ("citizen", "other@example.test", "Citizen Two", None),
+                ("field_worker", "worker@example.test", "Field Worker", "drainage"),
+                ("field_worker", "otherworker@example.test", "Other Worker", "roads"),
+                ("inspector", "inspector@example.test", "Inspector One", "drainage"),
             ]:
-                self.accounts[role + email] = app.create_user(db,email,name,"Correct-Horse-2026!",role)["id"]
+                self.accounts[role + email] = app.create_user(
+                    db,email,name,"Correct-Horse-2026!",role,department_id)["id"]
         self.admin = self.login("admin@example.test")
         self.municipal = self.login("municipal@example.test")
         self.citizen = self.login("citizen@example.test")
@@ -297,7 +298,8 @@ class ApiTests(unittest.TestCase):
 
     def test_admin_can_manage_accounts_and_routing_but_citizen_cannot(self):
         code, data, _ = self.request("/api/admin/users", {
-            "email":"crew2@example.test","display_name":"Crew Two","password":"Temporary-Password-2026!","role":"field_worker"
+            "email":"crew2@example.test","display_name":"Crew Two","password":"Temporary-Password-2026!",
+            "role":"field_worker","department_id":"roads"
         }, "POST", self.admin)
         self.assertEqual(code,201,data)
         worker_id=data["user"]["id"]
@@ -315,12 +317,41 @@ class ApiTests(unittest.TestCase):
             "category":"Forbidden","subcategory":"Route","department_id":"roads"
         }, "POST", self.citizen)[0],403)
 
+    def test_department_scope_limits_reports_workers_assignments_and_analytics(self):
+        drainage_code, drainage, _ = self.new_report()
+        heritage_code, heritage, _ = self.new_report(
+            category="Heritage and Historical Sites",
+            subcategory="Monument vandalism, graffiti or defacement",
+            title="Graffiti on historic stonework")
+        self.assertEqual((drainage_code,heritage_code),(201,201))
+        drainage_id=drainage["report"]["id"]
+        heritage_id=heritage["report"]["id"]
+
+        municipal_reports=self.request("/api/reports",session=self.municipal)[1]["reports"]
+        self.assertEqual([r["id"] for r in municipal_reports],[drainage_id])
+        self.assertEqual(self.request(f"/api/reports/{heritage_id}",session=self.municipal)[0],404)
+        manager_metrics=self.request("/api/analytics",session=self.municipal)[1]["analytics"]
+        self.assertEqual(manager_metrics["total"],1)
+        global_metrics=self.request("/api/analytics",session=self.admin)[1]["analytics"]
+        self.assertEqual(global_metrics["total"],2)
+
+        workers=self.request("/api/workers",session=self.municipal)[1]["workers"]
+        self.assertEqual([w["id"] for w in workers],[self.accounts["field_workerworker@example.test"]])
+        self.assertEqual(self.request(f"/api/reports/{drainage_id}", {
+            "action":"assign","department":"Drainage",
+            "worker_id":self.accounts["field_workerotherworker@example.test"]
+        },"POST",self.municipal)[0],403)
+        self.assertEqual(self.request(f"/api/reports/{drainage_id}", {
+            "action":"assign","department":"Roads and Engineering",
+            "worker_id":self.accounts["field_workerworker@example.test"]
+        },"POST",self.municipal)[0],403)
+
     def test_department_routing_and_data_derived_analytics(self):
         code, created, _ = self.new_report(category="Heritage and Historical Sites",
             subcategory="Monument vandalism, graffiti or defacement",title="Graffiti on old stone gate")
         self.assertEqual(code,201,created)
         self.assertIn("Heritage",created["recommendation"]["department"])
-        metrics=self.request("/api/analytics",session=self.municipal)[1]["analytics"]
+        metrics=self.request("/api/analytics",session=self.admin)[1]["analytics"]
         self.assertGreaterEqual(metrics["total"],1)
         self.assertEqual(metrics["verified_resolutions"],0)
         self.assertIsNone(metrics["average_resolution_hours"])
@@ -409,6 +440,10 @@ class ApiTests(unittest.TestCase):
             path=Path(folder)/"legacy.sqlite3"
             db=sqlite3.connect(path)
             db.execute("CREATE TABLE reports (id TEXT PRIMARY KEY, category TEXT NOT NULL, status TEXT NOT NULL, department TEXT)")
+            db.execute("""CREATE TABLE users (
+              id TEXT PRIMARY KEY,email TEXT NOT NULL,display_name TEXT NOT NULL,password_hash TEXT NOT NULL,
+              role TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+            )""")
             db.execute("INSERT INTO reports(id,category,status,department) VALUES (?,?,?,?)",
                        ("NG-LEGACY-123","Road damage","submitted",None))
             db.commit();db.close()
@@ -417,9 +452,13 @@ class ApiTests(unittest.TestCase):
                 with app.db_session() as db:
                     row=db.execute("SELECT id,category,subcategory,suggested_department FROM reports WHERE id=?",
                                    ("NG-LEGACY-123",)).fetchone()
+                    user_columns={column["name"] for column in db.execute("PRAGMA table_info(users)")}
+                    version=db.execute("SELECT version FROM schema_migrations").fetchone()["version"]
                 self.assertEqual(row["id"],"NG-LEGACY-123")
                 self.assertEqual(row["category"],"Road damage")
                 self.assertEqual(row["suggested_department"],"Roads and Engineering")
+                self.assertIn("department_id",user_columns)
+                self.assertEqual(version,3)
             finally:
                 app.DB_PATH=previous_db;app.UPLOADS_DIR=previous_uploads
 

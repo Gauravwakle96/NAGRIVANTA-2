@@ -1,12 +1,12 @@
 # Database schema and migrations
 
-SQLite foreign keys are enabled on each connection. All new mutations use parameterized SQL and `db_session()` transactions. Timestamps are UTC ISO-8601 strings. Startup uses idempotent `CREATE TABLE IF NOT EXISTS`, `PRAGMA table_info`, additive `ALTER TABLE`, indexes and `schema_migrations` version 2. It does not rebuild or drop legacy complaint tables.
+SQLite foreign keys are enabled on each connection. All new mutations use parameterized SQL and `db_session()` transactions. Timestamps are UTC ISO-8601 strings. Startup uses idempotent `CREATE TABLE IF NOT EXISTS`, `PRAGMA table_info`, additive `ALTER TABLE`, indexes and `schema_migrations` version 3. It does not rebuild or drop legacy complaint tables.
 
 ## Tables
 
 | Table | Purpose / important fields |
 | --- | --- |
-| `users` | User identity, unique case-insensitive email, PBKDF2 password hash, role, active flag, created/updated timestamps. |
+| `users` | User identity, unique case-insensitive email, PBKDF2 password hash, role, optional department assignment for municipal staff, active flag, created/updated timestamps. |
 | `sessions` | Hash of opaque session cookie, user, CSRF token, created time, absolute expiry. |
 | `login_throttles` | Failed sign-in count/window and lockout expiry keyed by normalized email. |
 | `reports` | Stable issue ID, description/category/location, workflow status, score, duplicate link, department/assignee, evidence references, optional lat/lon, owner, synthetic marker, timestamps, event JSON. |
@@ -26,6 +26,7 @@ Indexes cover report status/category/department/owner/assignee, session expiry, 
 
 - Existing report IDs, statuses, descriptions, event history and categories are preserved.
 - Missing columns/tables are added; new report owner/assignee/coordinates remain nullable for legacy records.
+- The version 3 migration adds nullable `users.department_id` and its role/scope index. Existing staff are not assigned a department automatically; department-scoped staff without an active department fail closed for report access and analytics until a system administrator assigns one.
 - Legacy category/subcategory and suggested department values are backfilled without changing the original report ID.
 - Fresh database startup initializes the catalog but does not create complaint records. Synthetic demo reports are created only through the explicit system-admin-only demo reset endpoint when `NAGRIVANTA_DEMO_RESET=1`; the operation refuses to run if any non-synthetic report exists.
 - Legacy data-URL evidence is moved to generated files and references become `evidence:<uuid>`. PNG/JPEG/WebP signatures keep their image content type. Other legacy bytes are preserved as `application/octet-stream` attachments, never served inline.
