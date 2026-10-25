@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
   <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script defer src="/i18n.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -29,6 +30,33 @@
         <div class="eyebrow">WELCOME TO NAGRIVANTA</div>
         <h2 id="authHeading">Sign in to your workspace</h2>
         <p class="muted">Use your account to access the right civic workflow.</p>
+        <div class="landing-actions">
+          <button id="openDemoButton" class="button primary full" type="button">Explore Live Demo <span aria-hidden="true">→</span></button>
+          <button id="landingCitizenButton" class="button secondary full" type="button">Register as Citizen</button>
+          <button id="landingSignInButton" class="button quiet full" type="button">Sign In</button>
+        </div>
+        <label class="language-control">Language
+          <select id="languageSelectAuth" aria-label="Choose language">
+            <option value="en">English</option><option value="mr">मराठी</option><option value="hi">हिन्दी</option>
+          </select>
+        </label>
+        <section id="demoPanel" class="demo-panel hidden" aria-labelledby="demoHeading">
+          <div class="demo-ribbon">INTERACTIVE DEMO — Uses synthetic demonstration data.</div>
+          <h2 id="demoHeading">Explore Nagrivanta</h2>
+          <p class="muted">See how a public issue can move through citizen reporting, municipal review, field work, inspection, and resolution. This is an isolated demo, not live government activity.</p>
+          <div class="demo-launch-actions">
+            <button id="startTourButton" class="button primary" type="button">Start Guided Tour</button>
+            <button id="exploreFreelyButton" class="button secondary" type="button">Explore Freely</button>
+          </div>
+          <div id="demoRoleCards" class="demo-role-grid">
+            <article class="demo-role-card"><span>01</span><h3>Citizen</h3><p>Submit and track an issue; receive updates and rate a verified resolution.</p><button class="button quiet small" data-demo-role="citizen" type="button">Open Citizen portal</button></article>
+            <article class="demo-role-card"><span>02</span><h3>Municipal Administrator</h3><p>Review reports, routing suggestions, and assign a field worker.</p><button class="button quiet small" data-demo-role="municipal_admin" type="button">Open Municipal portal</button></article>
+            <article class="demo-role-card"><span>03</span><h3>Field Worker</h3><p>Start assigned work and submit repair notes with synthetic evidence.</p><button class="button quiet small" data-demo-role="field_worker" type="button">Open Field Worker portal</button></article>
+            <article class="demo-role-card"><span>04</span><h3>Inspector</h3><p>Check repair work and approve it or return it for rework.</p><button class="button quiet small" data-demo-role="inspector" type="button">Open Inspector portal</button></article>
+            <article class="demo-role-card"><span>05</span><h3>System Administrator</h3><p>Review isolated demo metrics and audit activity; global controls are disabled.</p><button class="button quiet small" data-demo-role="system_admin" type="button">Open System Admin portal</button></article>
+          </div>
+          <button id="closeDemoButton" class="button quiet small" type="button">Back to sign in</button>
+        </section>
         <div class="auth-tabs" role="tablist" aria-label="Account access">
           <button class="auth-tab active" id="loginTab" type="button" role="tab" aria-selected="true">Sign in</button>
           <button class="auth-tab" id="registerTab" type="button" role="tab" aria-selected="false">Create citizen account</button>
@@ -54,7 +82,24 @@
     <header class="topbar">
       <a class="brand" href="/" aria-label="Nagrivanta dashboard"><span class="brand-mark">N</span><span><b>Nagrivanta</b><small>CIVIC GOVERNANCE</small></span></a>
       <div class="topbar-tools">
-        <span class="demo-pill"><i></i> Civic workflow demo</span>
+        <span class="demo-pill"><i></i> Civic workflow platform</span>
+        <div id="demoTools" class="demo-tools hidden">
+          <span class="demo-ribbon compact">INTERACTIVE DEMO — Uses synthetic demonstration data.</span>
+          <label class="demo-switch-label">Role
+            <select id="demoRoleSwitch" aria-label="Switch demonstration role">
+              <option value="citizen">Citizen</option><option value="municipal_admin">Municipal Administrator</option>
+              <option value="field_worker">Field Worker</option><option value="inspector">Inspector</option>
+              <option value="system_admin">System Administrator</option>
+            </select>
+          </label>
+          <button id="resetDemoButton" class="button quiet small" type="button">Reset demo</button>
+          <button id="exitDemoButton" class="button quiet small" type="button">Exit demo</button>
+        </div>
+        <label class="language-control app-language">Language
+          <select id="languageSelect" aria-label="Choose language">
+            <option value="en">EN</option><option value="mr">मराठी</option><option value="hi">हिन्दी</option>
+          </select>
+        </label>
         <button id="notificationsButton" class="icon-button" type="button" aria-label="Notifications">♧ <span id="notificationCount" class="count-badge hidden">0</span></button>
         <div class="profile"><span id="userInitials" class="avatar">N</span><span><b id="userName">Account</b><small id="userRole">Role</small></span></div>
         <button id="changePasswordButton" class="button quiet small" type="button">Change password</button>
@@ -69,11 +114,26 @@
       </aside>
       <main class="portal-content">
         <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+        <section id="demoGuide" class="demo-guide hidden" aria-live="polite"></section>
         <div id="viewRoot"></div>
         <footer class="footer-note">Nagrivanta is a demonstration platform and is not connected to a live municipal authority or official heritage register.</footer>
       </main>
     </div>
   </div>
+  <button id="assistantButton" class="assistant-fab hidden" type="button" aria-controls="assistantPanel" aria-expanded="false">?</button>
+  <section id="assistantPanel" class="assistant-panel hidden" aria-label="Nagrivanta Civic Assistant">
+    <header><div><b>Nagrivanta Civic Assistant</b><small>Deterministic FAQ · not a trained AI model</small></div><button id="assistantClose" class="button quiet small" type="button" aria-label="Close assistant">×</button></header>
+    <p class="assistant-intro">Choose a topic for guided help. This assistant does not access private complaint records.</p>
+    <div class="assistant-questions">
+      <button type="button" data-faq="submit">How do I submit a complaint?</button>
+      <button type="button" data-faq="track">How do I track a complaint?</button>
+      <button type="button" data-faq="statuses">What do statuses mean?</button>
+      <button type="button" data-faq="inspection">How do assignment and inspection work?</button>
+      <button type="button" data-faq="rework">What happens after rework is requested?</button>
+      <button type="button" data-faq="demo">How does the demo work?</button>
+    </div>
+    <div id="assistantAnswer" class="assistant-answer" role="status" aria-live="polite">Help here is general guidance, not a verified status update.</div>
+  </section>
   <dialog id="passwordDialog" class="password-dialog">
     <form id="passwordForm" class="stack-form">
       <div class="eyebrow">ACCOUNT SECURITY</div>

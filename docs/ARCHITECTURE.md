@@ -31,6 +31,9 @@ No separate SPA build, third-party Python dependency, official identity provider
 6. Only the assigned worker can start work and submit repair notes/evidence. Only an `inspector` can record the five checks. Approval requires all five checks to be true; rejection requires a failed check and notes.
 7. Work submissions and each inspection decision are append-only history rows. The current report status is a projection for queueing and display; event history is retained for traceability.
 8. Relevant notifications are created for owners, assignees, inspectors and municipal administrators. Notifications are in-app only.
+9. The public judge launcher creates five server-side demo identities and a random demo group. Report, evidence, worker, notification, analytics, feedback and reset paths enforce group scope. Role switching maps only to one of those stored identities and rotates the session; it is not a browser-controlled authorization claim.
+10. Duplicate checks compare only unresolved, recent reports inside the caller's ordinary/demo scope. A possible match returns a coarse explanation, and a separate report is persisted only after explicit acknowledgement.
+11. Citizen feedback is an append-only, one-per-report record accepted only from the owning citizen after verified closure. Synthetic feedback is reported separately from ordinary satisfaction metrics.
 
 ## Design choices
 
@@ -39,6 +42,7 @@ No separate SPA build, third-party Python dependency, official identity provider
 - **Filesystem evidence:** file bytes are outside `public/`; metadata, generated filename, content type, size, uploader and digest are stored in SQLite. The route uses authorization and `nosniff` headers. Production needs durable shared storage when multiple instances are involved.
 - **Map:** Leaflet and OpenStreetMap display only report coordinates provided by a submitter. No guessed city center, official asset layer or heritage designation is implied.
 - **Analytics:** calculations are made from persisted report and inspection rows. Empty denominators yield `null` rather than fabricated percentages.
+- **Localization and help:** a centralized English/Marathi/Hindi dictionary localizes interface strings only; submitted descriptions, evidence and notes are never machine-translated. The FAQ assistant is deterministic and does not make private API calls or rely on an external model.
 
 ## Operational considerations
 

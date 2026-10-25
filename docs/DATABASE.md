@@ -1,34 +1,38 @@
 # Database schema and migrations
 
-SQLite foreign keys are enabled on each connection. All new mutations use parameterized SQL and `db_session()` transactions. Timestamps are UTC ISO-8601 strings. Startup uses idempotent `CREATE TABLE IF NOT EXISTS`, `PRAGMA table_info`, additive `ALTER TABLE`, indexes and `schema_migrations` version 3. It does not rebuild or drop legacy complaint tables.
+SQLite foreign keys are enabled on each connection. All new mutations use parameterized SQL and `db_session()` transactions. Timestamps are UTC ISO-8601 strings. Startup uses idempotent `CREATE TABLE IF NOT EXISTS`, `PRAGMA table_info`, additive `ALTER TABLE`, indexes and `schema_migrations` version 4. It does not rebuild or drop legacy complaint tables.
 
 ## Tables
 
 | Table | Purpose / important fields |
 | --- | --- |
-| `users` | User identity, unique case-insensitive email, PBKDF2 password hash, role, optional department assignment for municipal staff, active flag, created/updated timestamps. |
+| `users` | User identity, unique case-insensitive email, PBKDF2 password hash, role, optional department assignment for municipal staff, active flag, demo-account/group markers, created/updated timestamps. |
 | `sessions` | Hash of opaque session cookie, user, CSRF token, created time, absolute expiry. |
 | `login_throttles` | Failed sign-in count/window and lockout expiry keyed by normalized email. |
-| `reports` | Stable issue ID, description/category/location, workflow status, score, duplicate link, department/assignee, evidence references, optional lat/lon, owner, synthetic marker, timestamps, event JSON. |
+| `reports` | Stable issue ID, description/category/location, workflow status, score, duplicate link, department/assignee, evidence references, optional lat/lon, owner, synthetic marker, optional isolated demo-group ID, timestamps, event JSON. |
 | `departments` | Configurable department ID, unique display name and active flag. |
 | `issue_categories` | Category/subcategory, default department, priority, keywords, escalation hours and active flag. |
 | `routing_rules` | Active category-to-department route and rule precedence. |
 | `evidence_files` | Evidence UUID, report, kind (`before`/`after`), uploader, generated storage name, safe content type, byte count, SHA-256 and timestamp. File bytes are in `UPLOADS_DIR`. |
 | `repair_submissions` | One row per field-worker repair attempt, worker, repair note, evidence reference and time. |
 | `inspections` | One row per inspector decision, approval flag, five boolean checks, notes and time. |
+| `citizen_feedback` | At most one immutable rating (1–5) and optional comment per verified complaint, owner and timestamp. Feedback is separate from resolution state. |
 | `notifications` | Recipient, optional report, event type, title/message, created and read timestamps. |
 | `audit_events` | Actor, action, entity, JSON details and timestamp. |
 | `schema_migrations` | Applied schema version and timestamp. |
 
-Indexes cover report status/category/department/owner/assignee, session expiry, evidence by report, notifications by recipient/read state, and inspections by report.
+Indexes cover report status/category/department/owner/assignee/demo group, demo users, feedback owner, session expiry, evidence by report, notifications by recipient/read state, and inspections by report.
 
 ## Migration behavior
 
 - Existing report IDs, statuses, descriptions, event history and categories are preserved.
 - Missing columns/tables are added; new report owner/assignee/coordinates remain nullable for legacy records.
 - The version 3 migration adds nullable `users.department_id` and its role/scope index. Existing staff are not assigned a department automatically; department-scoped staff without an active department fail closed for report access and analytics until a system administrator assigns one.
+- The version 4 migration adds nullable report/user `demo_group` columns, `users.is_demo`, the feedback table and supporting indexes. Ordinary reports retain `demo_group IS NULL`; public demo groups contain only synthetic reports.
 - Legacy category/subcategory and suggested department values are backfilled without changing the original report ID.
-- Fresh database startup initializes the catalog but does not create complaint records. Synthetic demo reports are created only through the explicit system-admin-only demo reset endpoint when `NAGRIVANTA_DEMO_RESET=1`; the operation refuses to run if any non-synthetic report exists.
+- Fresh database startup initializes the catalog but does not create complaint records. A public demo launch explicitly creates one isolated group; reset deletes and reseeds only that group. Idle groups are cleaned up after six hours when no unexpired session remains. The legacy system-admin reset is separately gated and refuses to run if ordinary reports or isolated groups exist.
+- Duplicate matching considers only unresolved records from the last 30 days and stays within the same demo group or ordinary-record scope. It never discards a submission; an acknowledged report retains its own ID and event history.
+- Feedback is write-once and accepted only from the report owner after `verified`. No response means no feedback row, never a zero rating. Analytics separate ordinary feedback from synthetic-demo feedback.
 - Legacy data-URL evidence is moved to generated files and references become `evidence:<uuid>`. PNG/JPEG/WebP signatures keep their image content type. Other legacy bytes are preserved as `application/octet-stream` attachments, never served inline.
 - A database backup and evidence-directory backup must be made before deploying against an existing production database. Test migration on a copy and verify report IDs, history and downloads before switching traffic.
 - Files and SQLite cannot participate in one atomic transaction. The implementation writes a uniquely named file and then its metadata in the active database transaction; a crash at the boundary may leave an orphan file. Production operations should include reconciliation/backup tooling.
