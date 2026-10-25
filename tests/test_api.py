@@ -379,6 +379,135 @@ class ApiTests(unittest.TestCase):
             else:
                 os.environ.pop("NAGRIVANTA_DEMO_RESET",None)
 
+    def test_public_demo_launcher_is_isolated_and_role_switch_is_server_scoped(self):
+        real_code, real, _ = self.new_report()
+        self.assertEqual(real_code,201)
+        code, launched, headers = self.request("/api/demo/session",{"role":"citizen"},"POST")
+        self.assertEqual(code,200,launched)
+        self.assertTrue(launched["user"]["is_demo"])
+        demo_cookie=SimpleCookie(headers.get("Set-Cookie",""))["nagrivanta_session"].value
+        demo={"cookie":demo_cookie,"csrf":launched["csrf_token"]}
+        code, listed, _ = self.request("/api/reports",session=demo)
+        self.assertEqual(code,200)
+        self.assertEqual(len(listed["reports"]),10)
+        self.assertTrue(all(row["synthetic"] for row in listed["reports"]))
+        self.assertEqual(self.request(f"/api/reports/{real['report']['id']}",session=demo)[0],404)
+        admin_reports=self.request("/api/reports",session=self.admin)[1]["reports"]
+        self.assertEqual([row["id"] for row in admin_reports],[real["report"]["id"]])
+        real_metrics=self.request("/api/analytics",session=self.admin)[1]["analytics"]
+        self.assertEqual(real_metrics["total"],1)
+        self.assertEqual(real_metrics["satisfaction"]["synthetic_feedback_count"],0)
+        self.assertEqual(len(self.request("/api/workers",session=self.municipal)[1]["workers"]),1)
+        audit=self.request("/api/admin/audit",session=self.admin)[1]["events"]
+        self.assertFalse(any(row["action"].startswith("demo_") for row in audit))
+        notification_metrics=self.request("/api/admin/notifications",session=self.admin)[1]["notification_metrics"]
+        self.assertFalse(any(row["kind"]=="demo_welcome" for row in notification_metrics))
+
+        code, switched, headers = self.request("/api/demo/switch",{"role":"municipal_admin"},"POST",demo)
+        self.assertEqual(code,200,switched)
+        self.assertEqual(switched["user"]["role"],"municipal_admin")
+        admin_demo={"cookie":SimpleCookie(headers.get("Set-Cookie",""))["nagrivanta_session"].value,
+                    "csrf":switched["csrf_token"]}
+        reports=self.request("/api/reports",session=admin_demo)[1]["reports"]
+        self.assertTrue(all(row["synthetic"] for row in reports))
+        workers=self.request("/api/workers",session=admin_demo)[1]["workers"]
+        self.assertEqual(len(workers),1)
+        assigned_report=next(row for row in reports if row["status"]=="submitted"
+                             and row["category"]=="Roads and Public Infrastructure")
+        self.assertEqual(self.request(f"/api/reports/{assigned_report['id']}",{
+            "action":"assign","department":"Roads and Engineering","worker_id":workers[0]["id"]},
+            "POST",admin_demo)[0],200)
+        code, switched, headers = self.request("/api/demo/switch",{"role":"field_worker"},"POST",admin_demo)
+        self.assertEqual(code,200)
+        worker_demo={"cookie":SimpleCookie(headers.get("Set-Cookie",""))["nagrivanta_session"].value,
+                     "csrf":switched["csrf_token"]}
+        assigned=self.request("/api/reports",session=worker_demo)[1]["reports"]
+        self.assertTrue(all(row["synthetic"] for row in assigned))
+        code, sys_admin, headers = self.request("/api/demo/switch",{"role":"system_admin"},"POST",worker_demo)
+        self.assertEqual(code,200)
+        system_demo={"cookie":SimpleCookie(headers.get("Set-Cookie",""))["nagrivanta_session"].value,
+                     "csrf":sys_admin["csrf_token"]}
+        self.assertEqual(self.request("/api/admin/users",session=system_demo)[0],403)
+        self.assertEqual(self.request("/api/demo/overview",session=system_demo)[0],200)
+        self.assertEqual(self.request("/api/demo/reset",{}, "POST",system_demo)[0],200)
+        after=self.request("/api/reports",session=system_demo)[1]["reports"]
+        self.assertTrue(all(row["synthetic"] for row in after))
+        citizen_reports=self.request("/api/reports",session=self.citizen)[1]["reports"]
+        self.assertEqual([row["id"] for row in citizen_reports],[real["report"]["id"]])
+        self.assertEqual(self.request("/api/reports",session=self.other_citizen)[1]["reports"],[])
+        with app.db_session() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reports WHERE synthetic=0").fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reports WHERE demo_group IS NOT NULL").fetchone()[0],10)
+
+    def test_duplicate_check_explains_matches_and_requires_explicit_continue(self):
+        code, first, _ = self.new_report()
+        self.assertEqual(code,201)
+        candidate={
+            "title":"Pothole at community clinic",
+            "description":"A deep pothole is damaging the road outside the community clinic.",
+            "category":"Water Supply and Drainage","area":"Ward Test",
+            "address":"Cedar Street near clinic","latitude":None,"longitude":None,
+        }
+        check=self.request("/api/duplicates/check",candidate,"POST",self.citizen)
+        self.assertEqual(check[0],200)
+        self.assertEqual(len(check[1]["matches"]),1)
+        self.assertNotIn(first["report"]["id"],json.dumps(check[1]))
+        code, blocked, _ = self.request("/api/reports",{
+            **candidate,"subcategory":"Blocked drain","before_photo":app.sample_photo("second")},
+            "POST",self.citizen)
+        self.assertEqual(code,409)
+        self.assertTrue(blocked["requires_confirmation"])
+        code, submitted, _ = self.request("/api/reports",{
+            **candidate,"subcategory":"Blocked drain","before_photo":app.sample_photo("second"),
+            "duplicate_acknowledged":True},"POST",self.citizen)
+        self.assertEqual(code,201,submitted)
+        self.assertNotEqual(first["report"]["id"],submitted["report"]["id"])
+        nearby={**candidate,"title":"Drain overflow near public clinic",
+                "description":"Blocked drain pooling water across clinic walkway.",
+                "area":"Ward Nearby","address":"Other Street near public clinic",
+                "latitude":18.5205,"longitude":73.8568}
+        proximity=self.request("/api/duplicates/check",nearby,"POST",self.citizen)
+        self.assertEqual(len(proximity[1]["matches"]),1)
+        self.assertIn("nearby coordinates",proximity[1]["matches"][0]["reason"])
+        far={**nearby,"latitude":18.9,"longitude":73.9,"area":"Distant ward",
+             "address":"Far Road, distant park"}
+        self.assertEqual(self.request("/api/duplicates/check",far,"POST",self.citizen)[1]["matches"],[])
+        with app.db_session() as db:
+            linked=db.execute("SELECT master_id FROM reports WHERE id=?",(submitted["report"]["id"],)).fetchone()
+            db.execute("UPDATE reports SET status='verified' WHERE id IN (?,?)",
+                       (first["report"]["id"],submitted["report"]["id"]))
+        self.assertEqual(linked["master_id"],first["report"]["id"])
+        resolved=self.request("/api/duplicates/check",candidate,"POST",self.citizen)
+        self.assertEqual(resolved[1]["matches"],[])
+        different_category={**candidate,"category":"Electricity and Streetlights"}
+        different=self.request("/api/duplicates/check",different_category,"POST",self.citizen)
+        self.assertEqual(different[1]["matches"],[])
+        unrelated={**candidate,"title":"Broken lighting","description":"The street lamp is out by a different plaza.",
+                   "address":"Different Avenue, park entrance","area":"Another ward"}
+        self.assertEqual(self.request("/api/duplicates/check",unrelated,"POST",self.citizen)[1]["matches"],[])
+
+    def test_feedback_requires_owner_verified_state_and_is_write_once(self):
+        code, created, _ = self.new_report()
+        self.assertEqual(code,201)
+        rid=created["report"]["id"]
+        self.assertEqual(self.request(f"/api/reports/{rid}/feedback",
+            {"rating":5,"comment":"Great"},"POST",self.citizen)[0],409)
+        with app.db_session() as db:
+            db.execute("UPDATE reports SET status='verified' WHERE id=?",(rid,))
+        self.assertEqual(self.request(f"/api/reports/{rid}/feedback",
+            {"rating":0,"comment":""},"POST",self.citizen)[0],400)
+        self.assertEqual(self.request(f"/api/reports/{rid}/feedback",
+            {"rating":5,"comment":"Great"},"POST",self.other_citizen)[0],404)
+        code, result, _=self.request(f"/api/reports/{rid}/feedback",
+            {"rating":4,"comment":"Clear updates"},"POST",self.citizen)
+        self.assertEqual(code,201,result)
+        self.assertEqual(self.request(f"/api/reports/{rid}/feedback",
+            {"rating":2,"comment":"Overwrite"},"POST",self.citizen)[0],409)
+        detail=self.request(f"/api/reports/{rid}",session=self.citizen)[1]["report"]
+        self.assertEqual(detail["feedback"]["rating"],4)
+        metrics=self.request("/api/analytics",session=self.admin)[1]["analytics"]["satisfaction"]
+        self.assertEqual(metrics["feedback_count"],1)
+        self.assertEqual(metrics["average_rating"],4)
     def test_bootstrap_creates_only_the_first_admin_and_never_promotes_a_citizen(self):
         keys = (
             "NAGRIVANTA_BOOTSTRAP_ADMIN_EMAIL",
@@ -458,7 +587,7 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(row["category"],"Road damage")
                 self.assertEqual(row["suggested_department"],"Roads and Engineering")
                 self.assertIn("department_id",user_columns)
-                self.assertEqual(version,3)
+                self.assertEqual(version,4)
             finally:
                 app.DB_PATH=previous_db;app.UPLOADS_DIR=previous_uploads
 

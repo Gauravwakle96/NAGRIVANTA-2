@@ -13,7 +13,12 @@ Nagrivanta is a synthetic-data civic issue workflow: citizens report an issue, s
 - In-app notifications targeted to relevant accounts, read/unread state, audit events, user/department/category/routing configuration.
 - Heritage Watch map and list backed only by submitted heritage complaints that have coordinates. It does not show official heritage assets.
 - Database-derived queue metrics, resolution times, rework and inspection rates, department workload and configurable escalation thresholds.
-- Additive SQLite startup migrations that preserve existing report IDs and workflow events. Old data-URL evidence is migrated to private storage where it can be decoded and is kept non-inline if its format is not a supported raster image.
+- A public **Explore Live Demo** launcher with isolated synthetic identities and records for all five roles, a guided tour, server-validated role switching, group-scoped reset, one-hour sessions, and inactive-group cleanup.
+- English, Marathi and Hindi labels for the main portal, forms, statuses, demo guide and deterministic FAQ. Complaint text and other user-authored content remain unchanged.
+- Explainable duplicate warnings for unresolved reports from the last 30 days. Citizens explicitly confirm before continuing; a new report always keeps its own ID and history.
+- Write-once citizen feedback (1–5 plus optional comment) after verified closure, with separate real-response and synthetic-demo satisfaction metrics.
+- A deterministic Civic Assistant FAQ in English, Marathi and Hindi; it does not access private case records or require an external AI provider.
+- Additive SQLite startup migrations through schema version 4 that preserve existing report IDs and workflow events. Old data-URL evidence is migrated to private storage where it can be decoded and is kept non-inline if its format is not a supported raster image.
 
 Routing and priority are deterministic rules, not a trained AI model. Recommendations are explainable and require human review. Priority values and seeded department names are illustrative, not official service commitments.
 
@@ -25,7 +30,9 @@ Requires Python 3.10+; no third-party Python runtime packages are used.
 python server.py
 ```
 
-Open <http://localhost:8000>. On first start the app creates `nagrivanta.sqlite3` and initializes the catalog; it does not automatically create complaint records. Citizen accounts can be registered through the UI; public registration cannot create staff or administrator accounts. If a disposable demo environment needs the four sample complaints, a system administrator can explicitly initialize them through `POST /api/demo/reset` after setting `NAGRIVANTA_DEMO_RESET=1`. That operation replaces existing synthetic complaints and refuses to run if non-synthetic complaints exist; do not enable it on a shared or production service.
+Open <http://localhost:8000>. On first start the app creates `nagrivanta.sqlite3` and initializes the catalog; it does not automatically create complaint records. Citizen accounts can be registered through the UI; public registration cannot create staff or administrator accounts. Judges can use **Explore Live Demo** without registering: the server creates five isolated synthetic identities and sample records, then opens the selected role. Demo sessions expire after one hour; idle groups are removed after six hours. **Reset demo** replaces only the current synthetic group. Demo roles cannot access ordinary accounts, complaints or global administration.
+
+The older `NAGRIVANTA_DEMO_RESET=1` switch is retained only for a signed-in System Administrator resetting legacy, ungrouped synthetic examples. It refuses to run if ordinary reports or isolated public-demo groups exist. Do not enable it on shared or production data.
 
 Create the first system administrator in a terminal (the password prompt does not echo):
 
@@ -56,7 +63,7 @@ Open the role-aware app at the site root (`/`) or use the `/admin` entry link. B
 | `NAGRIVANTA_BOOTSTRAP_ADMIN_PASSWORD` | Optional initial admin secret; never commit | unset |
 | `NAGRIVANTA_BOOTSTRAP_ADMIN_NAME` | Optional initial admin display name | `System Administrator` |
 | `NAGRIVANTA_COOKIE_SECURE` | Force `Secure` session cookie (`1`/`0`) | inferred from Render/HTTPS proxy |
-| `NAGRIVANTA_DEMO_RESET` | Enable explicit system-admin-only synthetic demo initialization/reset endpoint | disabled |
+| `NAGRIVANTA_DEMO_RESET` | Enable legacy system-admin reset for ungrouped synthetic examples (not required for public isolated demo) | disabled |
 
 See [`.env.example`](.env.example). Use distinct, writable database and evidence paths. Both paths must be placed on persistent storage if records must survive host restarts.
 
@@ -64,7 +71,7 @@ See [`.env.example`](.env.example). Use distinct, writable database and evidence
 
 The current schema includes `users`, `sessions`, `reports`, `departments`, `issue_categories`, `routing_rules`, `evidence_files`, `repair_submissions`, `inspections`, `notifications`, `audit_events`, `login_throttles` and `schema_migrations`. See [`docs/DATABASE.md`](docs/DATABASE.md).
 
-Startup applies idempotent additive changes and records schema version 3. Existing complaint IDs, report text, statuses and events are preserved. The additive staff-department migration does not infer department assignments; unassigned municipal staff have restricted access until a system administrator assigns an active department. Before deploying this version against any existing database, take a database backup and copy the existing evidence directory; test the upgrade on a copy first. Startup migration is not a substitute for a production backup or rollback plan.
+Startup applies idempotent additive changes and records schema version 4. Existing complaint IDs, report text, statuses and events are preserved. Version 4 adds isolated demo-group markers, the demo-account flag, an append-only feedback table and supporting indexes. The additive staff-department migration does not infer department assignments; unassigned municipal staff have restricted access until a system administrator assigns an active department. Before deploying this version against any existing database, take a database backup and copy the existing evidence directory; test the upgrade on a copy first. Startup migration is not a substitute for a production backup or rollback plan.
 
 Evidence is limited to PNG/JPEG/WebP and 1 MB per image. Files are saved under generated names outside `public/`, and are served only after checking the requester's report access. Unsupported legacy formats are archived as non-inline attachments where possible.
 
@@ -84,7 +91,7 @@ node --check public/app.js
 python -m py_compile server.py
 ```
 
-The automated API tests cover registration/login/logout, password rotation, origin and CSRF controls, login throttling, role and evidence access, complaint lifecycle, inspection rejection and rework, notifications, configuration, analytics, additive migration, startup seeding safety and first-admin bootstrap safety. A local Chromium run completed the full citizen → municipal assignment → field repair → inspector approval → citizen resolution flow without browser console errors or failed local responses. This was a one-off environment check, not a committed test dependency.
+The automated API tests cover registration/login/logout, password rotation, origin and CSRF controls, login throttling, role and evidence access, complaint lifecycle, inspection rejection and rework, notifications, configuration, analytics, additive migration, demo isolation/role switching/reset, duplicate confirmation and feedback authorization.
 
 ## Render deployment and storage warning
 
@@ -106,7 +113,7 @@ To demonstrate durable persistence, use a Render service/plan that supports a pe
 
 ## Judge demonstration
 
-Use [`docs/DEMO.md`](docs/DEMO.md) for a short end-to-end script. Create staff accounts first, register a citizen, submit a synthetic report, assign it, show repair evidence, inspect all five checks, and confirm the citizen's status and notification. For Heritage Watch, enter coordinates only for a clearly labelled test location; missing coordinates stay in the report list and are not invented.
+Open `/`, choose **Explore Live Demo**, then select **Start Guided Tour** (begins as Citizen) or open a specific role portal. Use the role selector in the top bar to switch between the five server-side demo identities. Submit a clearly synthetic complaint as Citizen, assign it as Municipal Administrator, submit repair evidence as Field Worker, and approve or return it as Inspector. The Citizen portal displays the stored timeline, notifications and post-verification feedback form. The System Administrator view is limited to synthetic metrics and audit events; account management and global configuration stay disabled. **Reset demo** affects only this group; **Exit demo** signs out. See [`docs/DEMO.md`](docs/DEMO.md) for the walkthrough.
 
 ## Working branch
 

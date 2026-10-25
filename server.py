@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 from http.cookies import SimpleCookie
 import base64, hashlib, hmac, json, math, os, re, secrets, sqlite3, struct, uuid, zlib
 import getpass, sys
+import threading
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
@@ -16,6 +17,9 @@ UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(ROOT / "private_uploads")))
 PORT = int(os.environ.get("PORT", "8000"))
 SESSION_COOKIE = "nagrivanta_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
+DEMO_ROLES = {"citizen", "municipal_admin", "field_worker", "inspector", "system_admin"}
+DEMO_LAUNCHES = {}
+DEMO_LAUNCH_LOCK = threading.Lock()
 PASSWORD_ITERATIONS = 310_000
 ROLES = {"citizen", "municipal_admin", "field_worker", "inspector", "system_admin"}
 ADMIN_ROLES = {"municipal_admin", "system_admin"}
@@ -221,6 +225,7 @@ def init_db():
             ("assigned_to", "TEXT REFERENCES users(id)"),
             ("latitude", "REAL"),
             ("longitude", "REAL"),
+            ("demo_group", "TEXT"),
         ):
             if name not in columns:
                 db.execute(f"ALTER TABLE reports ADD COLUMN {name} {definition}")
@@ -230,6 +235,10 @@ def init_db():
         user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
         if "department_id" not in user_columns:
             db.execute("ALTER TABLE users ADD COLUMN department_id TEXT REFERENCES departments(id)")
+        if "is_demo" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
+        if "demo_group" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN demo_group TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_users_department_role ON users(department_id,role,active)")
         db.execute('''CREATE TABLE IF NOT EXISTS issue_categories (
           id TEXT PRIMARY KEY, category TEXT NOT NULL, subcategory TEXT NOT NULL,
@@ -271,6 +280,11 @@ def init_db():
           inspector_id TEXT NOT NULL REFERENCES users(id), approved INTEGER NOT NULL,
           checks TEXT NOT NULL, notes TEXT NOT NULL, created_at TEXT NOT NULL
         )''')
+        db.execute('''CREATE TABLE IF NOT EXISTS citizen_feedback (
+          id TEXT PRIMARY KEY, report_id TEXT NOT NULL UNIQUE REFERENCES reports(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL REFERENCES users(id), rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+          comment TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        )''')
         db.execute('''CREATE TABLE IF NOT EXISTS notifications (
           id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           report_id TEXT REFERENCES reports(id) ON DELETE CASCADE,
@@ -295,6 +309,9 @@ def init_db():
         db.execute('CREATE INDEX IF NOT EXISTS idx_evidence_report ON evidence_files(report_id, kind)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at, created_at)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_inspections_report ON inspections(report_id, created_at)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_reports_demo_group ON reports(demo_group, status, created_at)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_users_demo_group ON users(demo_group, role, is_demo)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_feedback_owner ON citizen_feedback(owner_id, created_at)')
         # Backfill new fields without changing original report text or IDs.
         for row in db.execute("SELECT id, category, subcategory, suggested_department FROM reports").fetchall():
             group = canonical_category(row["category"])
@@ -304,7 +321,7 @@ def init_db():
                        (detail, suggested, row["id"]))
         # Never create synthetic complaints implicitly during startup. Demo
         # records are initialized only through the protected demo-reset action.
-        db.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (?,?)",(3,now()))
+        db.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (?,?)",(4,now()))
     # Older builds kept data URLs inside the reports table. Move those bytes
     # into private files without changing report IDs, status, or event history.
     migrate_legacy_evidence()
@@ -512,7 +529,15 @@ def all_reports(db):
 
 
 def find_duplicate(db, report):
-    candidates = db.execute("SELECT * FROM reports ORDER BY created_at DESC").fetchall()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds")
+    if report.get("demo_group"):
+        candidates = db.execute("""SELECT * FROM reports WHERE demo_group=? AND synthetic=1
+          AND status!='verified' AND created_at>=? ORDER BY created_at DESC LIMIT 300""",
+          (report["demo_group"],cutoff)).fetchall()
+    else:
+        candidates = db.execute("""SELECT * FROM reports WHERE demo_group IS NULL AND synthetic=0
+          AND status!='verified' AND created_at>=? ORDER BY created_at DESC LIMIT 300""",
+          (cutoff,)).fetchall()
     target_tokens = tokenize(report["title"] + " " + report["description"])
     for row in candidates:
         old = dict(row)
@@ -520,16 +545,26 @@ def find_duplicate(db, report):
             continue
         same_area = old["area"].strip().casefold() == report["area"].strip().casefold()
         same_address = old["address"].strip().casefold() == report["address"].strip().casefold()
-        if not same_area and not same_address:
-            continue
         old_tokens = tokenize(old["title"] + " " + old["description"])
         union = target_tokens | old_tokens
         similarity = len(target_tokens & old_tokens) / max(1, len(union))
-        if same_address or similarity >= 0.28:
+        near_coordinates = False
+        if (report.get("latitude") is not None and report.get("longitude") is not None
+                and old.get("latitude") is not None and old.get("longitude") is not None):
+            lat1,lat2 = math.radians(float(report["latitude"])),math.radians(float(old["latitude"]))
+            dlat = lat2-lat1
+            dlon = math.radians(float(old["longitude"])-float(report["longitude"]))
+            distance = 6371000 * 2 * math.asin(math.sqrt(
+                math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2))
+            near_coordinates = distance <= 150
+        if (same_address and (similarity >= 0.08 or not target_tokens or not old_tokens)) or \
+                (same_area and similarity >= 0.32) or (near_coordinates and similarity >= 0.18):
             root = old["master_id"] or old["id"]
-            reason = "same category + same specific location" if same_address else f"same category + area; text overlap {round(similarity * 100)}%"
-            return root, reason
-    return None, None
+            reason = ("same category, exact public location, and overlapping description" if same_address else
+                      "same category, nearby coordinates, and overlapping description" if near_coordinates else
+                      f"same category and locality; {round(similarity * 100)}% text overlap")
+            return root, reason, similarity, old["status"]
+    return None, None, None, None
 
 
 def insert_report(db, data, *, status="submitted", department=None, crew=None, after_photo=None, repair_note=None, verification=None, events=None, created_at=None):
@@ -542,7 +577,7 @@ def insert_report(db, data, *, status="submitted", department=None, crew=None, a
       (canonical_category(data.get("category", "")), subcategory)).fetchone()
     configured_priority = configured_priority["default_priority"] if configured_priority else None
     completeness, cf = score_completeness(data)
-    master_id, reason = find_duplicate(db, data)
+    master_id, reason, similarity, matched_status = find_duplicate(db, data)
     provisional_count = 1
     if master_id:
         provisional_count = 1 + db.execute("SELECT COUNT(*) FROM reports WHERE master_id=? OR id=?", (master_id, master_id)).fetchone()[0]
@@ -553,13 +588,13 @@ def insert_report(db, data, *, status="submitted", department=None, crew=None, a
         ev.append(event("System", "Linked to master issue", reason or "Possible duplicate"))
     db.execute('''INSERT INTO reports (id,title,category,description,area,address,before_photo,after_photo,status,
       completeness,completeness_factors,priority,priority_factors,master_id,duplicate_reason,department,crew,repair_note,
-      verification,events,created_at,updated_at,subcategory,suggested_department,synthetic,owner_id,assigned_to,latitude,longitude)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+      verification,events,created_at,updated_at,subcategory,suggested_department,synthetic,owner_id,assigned_to,latitude,longitude,demo_group)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
       (rid,data["title"],data["category"],data["description"],data["area"],data["address"],data["before_photo"],after_photo,status,
        completeness,json.dumps(cf),priority,json.dumps(pf),master_id,reason,department,crew,repair_note,
        json.dumps(verification) if verification is not None else None,json.dumps(ev),created,now(),
        subcategory,route,1 if data.get("synthetic") else 0,data.get("owner_id"),data.get("assigned_to"),
-       data.get("latitude"),data.get("longitude")))
+       data.get("latitude"),data.get("longitude"),data.get("demo_group")))
     # Recompute the master score after preserving each linked source report.
     root = master_id or rid
     group = db.execute("SELECT * FROM reports WHERE id=? OR master_id=?", (root, root)).fetchall()
@@ -571,7 +606,7 @@ def insert_report(db, data, *, status="submitted", department=None, crew=None, a
         base = priority_row["default_priority"] if priority_row else None
         p, factors = priority_for(dict(member), count, base)
         db.execute("UPDATE reports SET priority=?, priority_factors=?, updated_at=? WHERE id=?", (p,json.dumps(factors),now(),member["id"]))
-    return rid, master_id, reason
+    return rid, master_id, reason, {"similarity":round(similarity,2),"status":matched_status} if master_id else None
 
 
 def seed_demo(db):
@@ -588,6 +623,121 @@ def seed_demo(db):
             insert_report(db,item,status="repair_submitted",department="Drainage",crew="Crew A",after_photo=sample_photo("Drain • after", "#e6f1e6", "#188a66"),repair_note="Removed debris from the drain; ready for inspection.",events=[event("Citizen","Report submitted","Synthetic demo record"),event("Municipal","Work order assigned","Drainage • Crew A"),event("Field Crew","Repair submitted","Synthetic after-evidence; inspect before closure")])
         else:
             insert_report(db,item)
+
+
+def seed_demo_group(db, group_id, user_ids):
+    """Create one isolated, synthetic workflow for a temporary judge session."""
+    citizen = user_ids["citizen"]
+    worker = user_ids["field_worker"]
+    inspector = user_ids["inspector"]
+    admin = user_ids["municipal_admin"]
+    road_department = "Roads and Engineering"
+    cases = [
+      ("01","Pothole near school gate","Roads and Public Infrastructure","Potholes and damaged roads",
+       "Ward Demo 12","Lake Road, sample school gate","submitted"),
+      ("02","Loose footpath slabs","Roads and Public Infrastructure","Broken footpaths and pavements",
+       "Ward Demo 8","Market Lane, sample bus stop","assigned"),
+      ("03","Faded pedestrian crossing","Roads and Public Infrastructure","Damaged road signs",
+       "Ward Demo 5","Cedar Street, sample crossing","in_progress"),
+      ("04","Road edge needs patching","Roads and Public Infrastructure","Potholes and damaged roads",
+       "Ward Demo 3","Demo Avenue, sample junction","repair_submitted"),
+      ("05","Trip hazard at public walkway","Roads and Public Infrastructure","Broken footpaths and pavements",
+       "Ward Demo 6","Garden Path, sample entrance","verified"),
+      ("06","Uneven paving returned for rework","Roads and Public Infrastructure","Broken footpaths and pavements",
+       "Ward Demo 9","Civic Plaza, sample walkway","needs_rework"),
+      ("07","Water leakage near community hall","Water Supply and Drainage","Water leakage",
+       "Ward Demo 2","Demo Square, sample hall","submitted"),
+      ("08","Garbage accumulation at public bin","Solid Waste Management and Sanitation","Garbage accumulation",
+       "Ward Demo 4","Demo Market, sample bin","submitted"),
+      ("09","Streetlight not working","Electricity and Streetlights","Non-functional streetlight",
+       "Ward Demo 7","Demo Lane, sample stop","assigned"),
+      ("10","Water pooled at sample footpath","Water Supply and Drainage","Flooding or waterlogging",
+       "Ward Demo 10","Sample Crescent, public footpath","verified"),
+    ]
+    seeded = []
+    for suffix,title,category,subcategory,area,address,status in cases:
+        rid = f"NG-DEMO-{group_id.upper()}-{suffix}"
+        route = department_from_db(db,category,subcategory)
+        road_case = category == "Roads and Public Infrastructure"
+        assigned_to = worker if road_case and status != "submitted" else None
+        assigned_department = road_department if road_case and assigned_to else route
+        notes = "Synthetic demonstration record; sample location and details only."
+        history = [event("Demo citizen","Report submitted",notes)]
+        if assigned_to:
+            history.append(event("Demo municipal reviewer","Work order assigned",
+                                 f"{assigned_department} • Demo Field Worker"))
+        if status in {"in_progress","repair_submitted","verified","needs_rework"}:
+            history.append(event("Demo field worker","Work started","Demonstration workflow action."))
+        before_url = sample_photo(title, "#e5f0e8", "#117b6f")
+        after_url = None
+        repair_note = None
+        verification = None
+        if status in {"repair_submitted","verified","needs_rework"}:
+            repair_note = "Synthetic repair completion record for workflow demonstration."
+            after_url = sample_photo("Synthetic repair evidence", "#edf2df", "#c58d36")
+            history.append(event("Demo field worker","Repair submitted",repair_note))
+        approved = status == "verified"
+        if status in {"verified","needs_rework"}:
+            checks = {str(i): (approved or i != 3) for i in range(1,6)}
+            inspection_note = ("Synthetic sample inspection approved." if approved else
+                               "Synthetic sample inspection requests paving rework.")
+            verification = {"checks":checks,"approved":approved,"notes":inspection_note,
+                            "inspector":"Demo Inspector","inspected_at":now()}
+            history.append(event("Demo inspector","Repair verified" if approved else "Returned for rework",
+                                 inspection_note))
+        item = {"id":rid,"title":title,"category":category,"subcategory":subcategory,
+                "description":notes,"area":area,"address":address,"before_photo":before_url,
+                "synthetic":True,"demo_group":group_id,"owner_id":citizen,
+                "assigned_to":assigned_to,"suggested_department":route}
+        _,_,_,_ = insert_report(db,item,status=status,department=assigned_department if assigned_to else None,
+                                 crew="Demo Field Worker" if assigned_to else None,
+                                 after_photo=after_url,repair_note=repair_note,
+                                 verification=verification,events=history)
+        before_data,before_type = parse_image_data_url(before_url,"Demo sample evidence")
+        before_id = save_evidence_bytes(db,rid,"before",citizen,before_data,before_type)
+        db.execute("UPDATE reports SET before_photo=? WHERE id=?",(f"evidence:{before_id}",rid))
+        if after_url:
+            after_data,after_type = parse_image_data_url(after_url,"Demo sample repair evidence")
+            after_id = save_evidence_bytes(db,rid,"after",worker,after_data,after_type)
+            db.execute("UPDATE reports SET after_photo=? WHERE id=?",(f"evidence:{after_id}",rid))
+            db.execute("""INSERT INTO repair_submissions(id,report_id,worker_id,repair_note,evidence_id,created_at)
+              VALUES (?,?,?,?,?,?)""",(uuid.uuid4().hex,rid,worker,repair_note,after_id,now()))
+        if status in {"verified","needs_rework"}:
+            db.execute("""INSERT INTO inspections(id,report_id,inspector_id,approved,checks,notes,created_at)
+              VALUES (?,?,?,?,?,?,?)""",(uuid.uuid4().hex,rid,inspector,1 if approved else 0,
+              json.dumps(verification["checks"]),verification["notes"],verification["inspected_at"]))
+        db.execute("UPDATE reports SET updated_at=? WHERE id=?",(now(),rid))
+        seeded.append(rid)
+    db.execute("""INSERT INTO citizen_feedback(id,report_id,owner_id,rating,comment,created_at)
+      VALUES (?,?,?,?,?,?)""",(uuid.uuid4().hex,seeded[4],citizen,4,
+      "Synthetic sample feedback for interface demonstration.",now()))
+    notify_user(db,citizen,seeded[0],"demo_welcome","Welcome to the interactive demo",
+                "All records in this session are synthetic and isolated to this demonstration.")
+    record_audit(db,user_ids["system_admin"],"demo_group_initialized","demo",group_id,
+                 {"synthetic_reports":len(seeded)})
+    return seeded
+
+
+def prune_expired_demo_groups(db):
+    cutoff = (datetime.now(timezone.utc)-timedelta(hours=6)).isoformat(timespec="seconds")
+    stamp = now()
+    paths = []
+    groups = db.execute("""SELECT demo_group FROM users WHERE is_demo=1 AND demo_group IS NOT NULL
+      GROUP BY demo_group HAVING MAX(created_at) < ?""",(cutoff,)).fetchall()
+    for result in groups:
+        group = result["demo_group"]
+        active = db.execute("""SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id
+          WHERE u.demo_group=? AND s.expires_at>? LIMIT 1""",(group,stamp)).fetchone()
+        if active:
+            continue
+        paths.extend(UPLOADS_DIR / row["storage_name"] for row in db.execute("""SELECT e.storage_name
+          FROM evidence_files e JOIN reports r ON r.id=e.report_id
+          WHERE r.demo_group=?""",(group,)).fetchall())
+        db.execute("UPDATE reports SET master_id=NULL WHERE demo_group=?",(group,))
+        db.execute("DELETE FROM reports WHERE demo_group=?",(group,))
+        db.execute("DELETE FROM audit_events WHERE actor_id IN (SELECT id FROM users WHERE demo_group=?)",(group,))
+        db.execute("DELETE FROM users WHERE demo_group=? AND is_demo=1",(group,))
+    return paths
 
 
 def json_response(handler, data, status=200, headers=None):
@@ -650,7 +800,8 @@ def validate_department_assignment(db, role, department_id):
     return None
 
 
-def create_user(db, email, display_name, password, role="citizen", department_id=None):
+def create_user(db, email, display_name, password, role="citizen", department_id=None,
+                *, is_demo=False, demo_group=None):
     email = normalize_email(email)
     password = validate_password(password)
     if role not in ROLES:
@@ -661,22 +812,24 @@ def create_user(db, email, display_name, password, role="citizen", department_id
     user_id = uuid.uuid4().hex
     timestamp = now()
     try:
-        db.execute("""INSERT INTO users(id,email,display_name,password_hash,role,department_id,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?)""",
-          (user_id,email,display_name.strip(),hash_password(password),role,department_id or None,timestamp,timestamp))
+        db.execute("""INSERT INTO users(id,email,display_name,password_hash,role,department_id,
+          is_demo,demo_group,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+          (user_id,email,display_name.strip(),hash_password(password),role,department_id or None,
+           1 if is_demo else 0,demo_group,timestamp,timestamp))
     except sqlite3.IntegrityError as exc:
         if "email" in str(exc).lower():
             raise ValueError("An account with that email already exists.") from exc
         raise
-    return db.execute("SELECT id,email,display_name,role,active,department_id,created_at FROM users WHERE id=?",
+    return db.execute("SELECT id,email,display_name,role,active,department_id,is_demo,demo_group,created_at FROM users WHERE id=?",
                       (user_id,)).fetchone()
 
 
-def make_session(db, user_id):
+def make_session(db, user_id, ttl_seconds=None):
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
     timestamp = now()
-    expires = (datetime.now(timezone.utc) + timedelta(seconds=SESSION_TTL_SECONDS)).isoformat(timespec="seconds")
+    expires = (datetime.now(timezone.utc) + timedelta(
+        seconds=ttl_seconds or SESSION_TTL_SECONDS)).isoformat(timespec="seconds")
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     db.execute("DELETE FROM sessions WHERE expires_at < ?", (timestamp,))
     db.execute("INSERT INTO sessions(token_hash,user_id,csrf_token,created_at,expires_at) VALUES (?,?,?,?,?)",
@@ -693,7 +846,8 @@ def user_payload(row, db=None):
         department_name = department["name"] if department else None
     return {"id": row["id"], "email": row["email"], "display_name": row["display_name"],
             "role": row["role"], "active": bool(row["active"]), "department_id": department_id,
-            "department_name": department_name, "created_at": row["created_at"]}
+            "department_name": department_name, "created_at": row["created_at"],
+            "is_demo": bool(row["is_demo"]) if "is_demo" in keys else False}
 
 
 def record_audit(db, actor_id, action, entity_type, entity_id=None, details=None):
@@ -710,11 +864,16 @@ def notify_user(db, user_id, report_id, kind, title, message):
           (uuid.uuid4().hex,user_id,report_id,kind,title[:120],message[:500],now()))
 
 
-def notify_roles(db, roles, report_id, kind, title, message):
+def notify_roles(db, roles, report_id, kind, title, message, demo_group=None):
     placeholders = ",".join("?" for _ in roles)
     if not placeholders:
         return
-    rows = db.execute(f"SELECT id FROM users WHERE active=1 AND role IN ({placeholders})", tuple(roles)).fetchall()
+    if demo_group:
+        rows = db.execute(f"""SELECT id FROM users WHERE active=1 AND is_demo=1
+          AND demo_group=? AND role IN ({placeholders})""",(demo_group,*tuple(roles))).fetchall()
+    else:
+        rows = db.execute(f"""SELECT id FROM users WHERE active=1 AND is_demo=0
+          AND role IN ({placeholders})""", tuple(roles)).fetchall()
     for row in rows:
         notify_user(db,row["id"],report_id,kind,title,message)
 
@@ -810,6 +969,11 @@ def migrate_legacy_evidence():
 
 
 def can_view_report(db,user,row):
+    if user.get("is_demo"):
+        if not row["synthetic"] or row["demo_group"] != user.get("demo_group"):
+            return False
+    elif row["demo_group"] is not None or row["synthetic"]:
+        return False
     if user["role"] == "system_admin":
         return True
     department = row["department"] or row["suggested_department"]
@@ -828,8 +992,12 @@ def can_view_report(db,user,row):
     return False
 
 
-def report_for_user(row,user):
+def report_for_user(row,user,db=None):
     item = pack(row)
+    item.pop("demo_group",None)
+    if item.get("assigned_to") and db:
+        assigned = db.execute("SELECT display_name FROM users WHERE id=?",(item["assigned_to"],)).fetchone()
+        item["assigned_worker_name"] = assigned["display_name"] if assigned else None
     if user["role"] == "citizen":
         for key in ("completeness_factors","priority_factors","master_id","duplicate_reason","assigned_to"):
             item.pop(key,None)
@@ -876,12 +1044,21 @@ def validate_coordinates(latitude,longitude):
     return lat,lng
 
 
-def analytics_payload(db, department_name=None):
+def analytics_payload(db, department_name=None, demo_group=None):
     report_scope = ""
     scope_params = ()
     if department_name is not None:
         report_scope = " AND COALESCE(NULLIF(r.department,''),NULLIF(r.suggested_department,''))=?"
         scope_params = (department_name,)
+    # Demo metrics are always restricted to the server-authenticated session's
+    # group; ordinary administrators never receive those rows.
+    if demo_group is not None:
+        report_scope += " AND r.demo_group=?"
+        scope_params += (demo_group,)
+    else:
+        # Ordinary operational dashboards must not mix public demo or legacy
+        # synthetic activity into real complaint totals and satisfaction.
+        report_scope += " AND r.demo_group IS NULL AND r.synthetic=0"
     total = db.execute("SELECT COUNT(*) FROM reports r WHERE 1=1"+report_scope,
                        scope_params).fetchone()[0]
     counts = {row["status"]:row["n"] for row in db.execute(
@@ -918,6 +1095,18 @@ def analytics_payload(db, department_name=None):
             pass
     high_priority = db.execute("""SELECT COUNT(*) FROM reports r WHERE r.priority>=70
       AND r.status!='verified'""" + report_scope,scope_params).fetchone()[0]
+    satisfaction_rows = db.execute("""SELECT f.rating,r.synthetic,COUNT(*) AS item_count
+      FROM citizen_feedback f JOIN reports r ON r.id=f.report_id
+      WHERE 1=1""" + report_scope + " GROUP BY f.rating,r.synthetic",scope_params).fetchall()
+    real_distribution = {str(value):0 for value in range(1,6)}
+    synthetic_distribution = {str(value):0 for value in range(1,6)}
+    real_ratings = []
+    synthetic_ratings = []
+    for row in satisfaction_rows:
+        target = synthetic_distribution if row["synthetic"] else real_distribution
+        target[str(row["rating"])] = row["item_count"]
+        (synthetic_ratings if row["synthetic"] else real_ratings).extend(
+            [row["rating"]] * row["item_count"])
     return {
       "total":total,"pending":total-resolved,"awaiting_assignment":counts.get("submitted",0),
       "awaiting_inspection":counts.get("repair_submitted",0),
@@ -928,6 +1117,12 @@ def analytics_payload(db, department_name=None):
       "inspection_count":total_inspections,
       "inspection_approval_rate":round((total_inspections-rejected)*100/total_inspections,1) if total_inspections else None,
       "rework_rate":round(rejected*100/total_inspections,1) if total_inspections else None,
+      "satisfaction":{"feedback_count":len(real_ratings),
+        "average_rating":round(sum(real_ratings)/len(real_ratings),2) if real_ratings else None,
+        "rating_distribution":real_distribution,
+        "synthetic_feedback_count":len(synthetic_ratings),
+        "synthetic_average_rating":round(sum(synthetic_ratings)/len(synthetic_ratings),2) if synthetic_ratings else None,
+        "synthetic_rating_distribution":synthetic_distribution},
       "definitions":{"resolution_rate":"verified reports divided by all reports",
         "average_resolution_hours":"mean created-to-verified elapsed time for verified reports",
         "overdue":"open reports older than their category's configured escalation threshold (default 168 hours)",
@@ -1023,7 +1218,8 @@ class Handler(BaseHTTPRequestHandler):
         token_hash = hashlib.sha256(morsel.value.encode()).hexdigest()
         with db_session() as db:
             row = db.execute("""SELECT s.token_hash,s.csrf_token,s.expires_at,
-              u.id,u.email,u.display_name,u.role,u.active,u.department_id,d.name AS department_name,u.created_at
+              u.id,u.email,u.display_name,u.role,u.active,u.department_id,u.is_demo,u.demo_group,
+              d.name AS department_name,u.created_at
               FROM sessions s JOIN users u ON u.id=s.user_id
               LEFT JOIN departments d ON d.id=u.department_id AND d.active=1
               WHERE s.token_hash=?""",(token_hash,)).fetchone()
@@ -1064,6 +1260,23 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self,{"authenticated":False})
             return json_response(self,{"authenticated":True,"user":user_payload(user),
                                        "csrf_token":user["csrf_token"],"expires_at":user["expires_at"]})
+        if path == "/api/demo/overview":
+            user = self.require_user({"system_admin"})
+            if not user:
+                return
+            if not user.get("is_demo"):
+                return json_response(self,{"error":"This view is only available in the isolated demo."},403)
+            with db_session() as db:
+                metrics = analytics_payload(db,demo_group=user["demo_group"])
+                audit = [dict(row) for row in db.execute("""SELECT a.action,a.entity_type,a.entity_id,
+                  a.details,a.created_at,u.display_name AS actor FROM audit_events a
+                  LEFT JOIN users u ON u.id=a.actor_id
+                  WHERE u.demo_group=? ORDER BY a.created_at DESC LIMIT 40""",
+                  (user["demo_group"],)).fetchall()]
+                for item in audit:
+                    item["details"] = json.loads(item["details"] or "{}")
+                return json_response(self,{"analytics":metrics,"audit_events":audit,
+                  "demo_notice":"Synthetic metrics for this isolated interactive session only."})
         if path == "/api/reports":
             user = self.require_user()
             if not user:
@@ -1078,8 +1291,16 @@ class Handler(BaseHTTPRequestHandler):
                 row = db.execute("SELECT * FROM reports WHERE id=?",(rid,)).fetchone()
                 if not row or not can_view_report(db,user,row):
                     return json_response(self,{"error":"Issue not found."},404)
-                report = report_for_user(row,user)
+                report = report_for_user(row,user,db)
                 report.update(report_history(db,rid))
+                report["notifications"] = [dict(item) for item in db.execute("""SELECT title,message,created_at,read_at
+                  FROM notifications WHERE report_id=? AND user_id=? ORDER BY created_at DESC LIMIT 8""",
+                  (rid,user["id"])).fetchall()]
+                if user["role"] == "citizen":
+                    feedback = db.execute("""SELECT rating,comment,created_at FROM citizen_feedback
+                      WHERE report_id=? AND owner_id=?""",(rid,user["id"])).fetchone()
+                    report["feedback"] = dict(feedback) if feedback else None
+                    report["feedback_open"] = row["status"] == "verified" and feedback is None
                 return json_response(self,{"report":report})
         if path.startswith("/api/evidence/"):
             user = self.require_user()
@@ -1101,13 +1322,17 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 return
             with db_session() as db:
-                if user["role"] == "municipal_admin":
+                if user.get("is_demo"):
                     rows = db.execute("""SELECT id,display_name,email FROM users
-                      WHERE role='field_worker' AND active=1 AND department_id=?
+                      WHERE role='field_worker' AND active=1 AND is_demo=1 AND demo_group=?
+                      ORDER BY display_name""",(user["demo_group"],)).fetchall()
+                elif user["role"] == "municipal_admin":
+                    rows = db.execute("""SELECT id,display_name,email FROM users
+                      WHERE role='field_worker' AND active=1 AND is_demo=0 AND department_id=?
                       ORDER BY display_name""",(user["department_id"] or "",)).fetchall()
                 else:
                     rows = db.execute("""SELECT id,display_name,email FROM users
-                      WHERE role='field_worker' AND active=1 ORDER BY display_name""").fetchall()
+                      WHERE role='field_worker' AND active=1 AND is_demo=0 ORDER BY display_name""").fetchall()
                 return json_response(self,{"workers":[dict(row) for row in rows]})
         if path == "/api/analytics":
             user = self.require_user(ADMIN_ROLES)
@@ -1117,21 +1342,26 @@ class Handler(BaseHTTPRequestHandler):
                 scope = user.get("department_name") if user["role"] == "municipal_admin" else None
                 if user["role"] == "municipal_admin" and not scope:
                     scope = ""
-                return json_response(self,{"analytics":analytics_payload(db,scope)})
+                return json_response(self,{"analytics":analytics_payload(
+                    db,scope,user.get("demo_group") if user.get("is_demo") else None)})
         if path == "/api/admin/users":
             user = self.require_user({"system_admin"})
             if not user:
                 return
+            if user.get("is_demo"):
+                return json_response(self,{"error":"Account management is disabled in the public demo."},403)
             with db_session() as db:
                 rows = db.execute("""SELECT u.id,u.email,u.display_name,u.role,u.active,u.department_id,
                   d.name AS department_name,u.created_at FROM users u
                   LEFT JOIN departments d ON d.id=u.department_id
-                  ORDER BY u.created_at DESC LIMIT 500""").fetchall()
+                  WHERE u.is_demo=0 ORDER BY u.created_at DESC LIMIT 500""").fetchall()
                 return json_response(self,{"users":[user_payload(row) for row in rows]})
         if path == "/api/admin/config":
             user = self.require_user({"system_admin"})
             if not user:
                 return
+            if user.get("is_demo"):
+                return json_response(self,{"error":"Global configuration is disabled in the public demo."},403)
             with db_session() as db:
                 departments = [dict(row) for row in db.execute(
                   "SELECT id,name,active FROM departments ORDER BY name")]
@@ -1144,9 +1374,12 @@ class Handler(BaseHTTPRequestHandler):
             user = self.require_user({"system_admin"})
             if not user:
                 return
+            if user.get("is_demo"):
+                return json_response(self,{"error":"Use the synthetic-only demo overview."},403)
             with db_session() as db:
                 rows = db.execute("""SELECT a.id,a.action,a.entity_type,a.entity_id,a.details,a.created_at,
                   u.display_name AS actor FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id
+                  WHERE u.is_demo=0 OR u.id IS NULL
                   ORDER BY a.created_at DESC LIMIT 200""").fetchall()
                 result = []
                 for row in rows:
@@ -1158,16 +1391,27 @@ class Handler(BaseHTTPRequestHandler):
             user = self.require_user({"system_admin"})
             if not user:
                 return
+            if user.get("is_demo"):
+                return json_response(self,{"error":"Global notification analytics are disabled in the public demo."},403)
             with db_session() as db:
                 rows = db.execute("""SELECT kind,COUNT(*) AS total,
                   SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread,
-                  MAX(created_at) AS latest FROM notifications GROUP BY kind ORDER BY total DESC""").fetchall()
+                  MAX(n.created_at) AS latest FROM notifications n
+                  JOIN users u ON u.id=n.user_id WHERE u.is_demo=0
+                  GROUP BY kind ORDER BY total DESC""").fetchall()
                 return json_response(self,{"notification_metrics":[dict(row) for row in rows]})
         return self.static_file(path)
 
     def do_POST(self):
         path = urlparse(self.path).path
         try:
+            if path == "/api/demo/session":
+                if not self.origin_allowed():
+                    return json_response(self,{"error":"Request origin was not accepted."},403)
+                data = self.body()
+                if not isinstance(data,dict) or data.get("role") not in DEMO_ROLES:
+                    raise ValueError("Choose one of the available demonstration roles.")
+                return self.create_demo_session(data["role"])
             if path in {"/api/auth/register","/api/auth/login"}:
                 if not self.origin_allowed():
                     return json_response(self,{"error":"Request origin was not accepted."},403)
@@ -1193,6 +1437,44 @@ class Handler(BaseHTTPRequestHandler):
             data = self.body()
             if not isinstance(data,dict):
                 raise ValueError("Request body must be a JSON object.")
+            if path == "/api/demo/switch":
+                if not user.get("is_demo"):
+                    return json_response(self,{"error":"Role switching is only available within a demo session."},403)
+                role = data.get("role")
+                if role not in DEMO_ROLES:
+                    raise ValueError("Choose a supported demonstration role.")
+                with db_session() as db:
+                    row = db.execute("""SELECT * FROM users WHERE demo_group=? AND role=?
+                      AND is_demo=1 AND active=1 LIMIT 1""",(user["demo_group"],role)).fetchone()
+                    if not row:
+                        return json_response(self,{"error":"That role is unavailable in this demo session."},403)
+                    db.execute("DELETE FROM sessions WHERE token_hash=?",(user["token_hash"],))
+                    token,csrf,expires = make_session(db,row["id"],3600)
+                    result = {"user":user_payload(row,db),"csrf_token":csrf,"expires_at":expires}
+                    record_audit(db,user["id"],"demo_role_switched","demo",user["demo_group"],
+                                 {"role":role})
+                return json_response(self,result,headers=self.cookie_headers(token))
+            if path == "/api/duplicates/check":
+                if user["role"] != "citizen":
+                    return json_response(self,{"error":"Only citizens can check for similar reports."},403)
+                candidate = {
+                    "title":str(data.get("title",""))[:100],
+                    "description":str(data.get("description",""))[:1200],
+                    "category":str(data.get("category","")),
+                    "area":str(data.get("area",""))[:100],
+                    "address":str(data.get("address",""))[:240],
+                    "latitude":data.get("latitude"),"longitude":data.get("longitude"),
+                    "demo_group":user.get("demo_group") if user.get("is_demo") else None,
+                }
+                if not candidate["title"].strip() or not candidate["description"].strip():
+                    return json_response(self,{"matches":[]})
+                candidate["latitude"],candidate["longitude"] = validate_coordinates(
+                    candidate["latitude"],candidate["longitude"])
+                with db_session() as db:
+                    _,reason,similarity,status = find_duplicate(db,candidate)
+                matches = ([{"reason":reason,"status":status,
+                             "text_similarity":similarity}] if reason else [])
+                return json_response(self,{"matches":matches,"can_continue":True})
             if path == "/api/auth/password":
                 current = data.get("current_password")
                 new = validate_password(data.get("new_password"))
@@ -1225,23 +1507,75 @@ class Handler(BaseHTTPRequestHandler):
                 if user["role"] != "citizen":
                     return json_response(self,{"error":"Only citizen accounts can submit public complaints."},403)
                 return self.create_report(user,data)
+            if path.startswith("/api/reports/") and path.endswith("/feedback"):
+                rid = path.split("/")[3]
+                if user["role"] != "citizen":
+                    return json_response(self,{"error":"Only the complaint owner can provide citizen feedback."},403)
+                rating = data.get("rating")
+                comment = data.get("comment","")
+                if type(rating) is not int or not 1 <= rating <= 5:
+                    raise ValueError("Choose a satisfaction rating from 1 to 5.")
+                if not isinstance(comment,str) or len(comment.strip()) > 1000:
+                    raise ValueError("Feedback must be 1,000 characters or fewer.")
+                with db_session() as db:
+                    row = db.execute("SELECT * FROM reports WHERE id=?",(rid,)).fetchone()
+                    if not row or row["owner_id"] != user["id"] or not can_view_report(db,user,row):
+                        return json_response(self,{"error":"Issue not found."},404)
+                    if row["status"] != "verified":
+                        return json_response(self,{"error":"Feedback is available after inspection verifies the repair."},409)
+                    if db.execute("SELECT 1 FROM citizen_feedback WHERE report_id=?",(rid,)).fetchone():
+                        return json_response(self,{"error":"Feedback has already been recorded and cannot be overwritten."},409)
+                    stamp = now()
+                    db.execute("""INSERT INTO citizen_feedback(id,report_id,owner_id,rating,comment,created_at)
+                      VALUES (?,?,?,?,?,?)""",(uuid.uuid4().hex,rid,user["id"],rating,comment.strip(),stamp))
+                    record_audit(db,user["id"],"citizen_feedback_submitted","report",rid,
+                                 {"rating":rating,"comment_included":bool(comment.strip())})
+                return json_response(self,{"ok":True,"message":"Thank you. Your feedback was recorded.",
+                                           "created_at":stamp},201)
+            if path.startswith("/api/admin/") and user.get("is_demo"):
+                return json_response(self,{"error":"Global administration is disabled in the public demo."},403)
             if path.startswith("/api/reports/"):
                 rid = path.split("/")[3]
                 return self.transition(user,rid,data)
             if path == "/api/demo/reset":
+                if user.get("is_demo"):
+                    evidence_paths = []
+                    with db_session() as db:
+                        group = user["demo_group"]
+                        evidence_paths = [UPLOADS_DIR / row["storage_name"] for row in db.execute("""
+                          SELECT e.storage_name FROM evidence_files e JOIN reports r ON r.id=e.report_id
+                          WHERE r.demo_group=?""",(group,)).fetchall()]
+                        db.execute("UPDATE reports SET master_id=NULL WHERE demo_group=?",(group,))
+                        db.execute("DELETE FROM reports WHERE demo_group=?",(group,))
+                        user_rows = db.execute("SELECT id,role FROM users WHERE demo_group=? AND is_demo=1",
+                                               (group,)).fetchall()
+                        user_ids = {row["role"]:row["id"] for row in user_rows}
+                        if set(user_ids) != DEMO_ROLES:
+                            return json_response(self,{"error":"The isolated demo account set is incomplete."},409)
+                        seeded = seed_demo_group(db,group,user_ids)
+                        record_audit(db,user["id"],"demo_reset","demo",group,
+                                     {"synthetic_reports":len(seeded)})
+                    for evidence_path in evidence_paths:
+                        try:
+                            evidence_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    return json_response(self,{"ok":True,"synthetic_reports":len(seeded)})
                 if user["role"] != "system_admin":
                     return json_response(self,{"error":"System administrator access is required."},403)
                 if os.environ.get("NAGRIVANTA_DEMO_RESET","0") != "1":
                     return json_response(self,{"error":"Demo reset is disabled. Enable only for disposable synthetic data."},403)
                 evidence_paths = []
                 with db_session() as db:
-                    real_records = db.execute("SELECT COUNT(*) FROM reports WHERE synthetic=0").fetchone()[0]
+                    real_records = db.execute("""SELECT COUNT(*) FROM reports
+                      WHERE synthetic=0 OR demo_group IS NOT NULL""").fetchone()[0]
                     if real_records:
-                        return json_response(self,{"error":"Reset refused because non-synthetic complaints exist."},403)
+                        return json_response(self,{"error":"Reset refused because ordinary records or isolated demo sessions exist."},403)
                     evidence_paths = [UPLOADS_DIR / row["storage_name"] for row in
-                                      db.execute("SELECT storage_name FROM evidence_files").fetchall()]
-                    db.execute("UPDATE reports SET master_id=NULL")
-                    db.execute("DELETE FROM reports")
+                                      db.execute("""SELECT e.storage_name FROM evidence_files e JOIN reports r
+                                        ON r.id=e.report_id WHERE r.demo_group IS NULL""").fetchall()]
+                    db.execute("UPDATE reports SET master_id=NULL WHERE demo_group IS NULL")
+                    db.execute("DELETE FROM reports WHERE demo_group IS NULL")
                     seed_demo(db)
                     record_audit(db,user["id"],"demo_reset","system")
                 for evidence_path in evidence_paths:
@@ -1282,6 +1616,54 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             print("Request error: unexpected application exception")
             return json_response(self,{"error":"The request could not be completed. Please retry."},500)
+
+    def create_demo_session(self, role):
+        client = self.client_address[0]
+        stamp = datetime.now(timezone.utc).timestamp()
+        with DEMO_LAUNCH_LOCK:
+            attempts = [value for value in DEMO_LAUNCHES.get(client,[]) if stamp-value < 900]
+            if len(attempts) >= 8:
+                DEMO_LAUNCHES[client] = attempts
+                return json_response(self,{"error":"Demo launch limit reached. Please wait before starting another session."},429)
+            attempts.append(stamp)
+            DEMO_LAUNCHES[client] = attempts
+        group = secrets.token_hex(12)
+        names = {
+            "citizen":"Demo Citizen","municipal_admin":"Demo Municipal Reviewer",
+            "field_worker":"Demo Field Worker","inspector":"Demo Inspector",
+            "system_admin":"Demo System Administrator",
+        }
+        token = csrf = expires = None
+        expired_paths = []
+        with db_session() as db:
+            expired_paths = prune_expired_demo_groups(db)
+            department = db.execute("SELECT id FROM departments WHERE id='roads' AND active=1").fetchone()
+            if not department:
+                return json_response(self,{"error":"Demo setup is unavailable. Please try again later."},503)
+            password_hash = hash_password(secrets.token_urlsafe(48))
+            user_ids = {}
+            for demo_role in sorted(DEMO_ROLES):
+                user_id = uuid.uuid4().hex
+                email = f"demo-{group}-{demo_role}@example.invalid"
+                dept_id = department["id"] if demo_role in DEPARTMENT_ROLES else None
+                db.execute("""INSERT INTO users(id,email,display_name,password_hash,role,department_id,
+                  is_demo,demo_group,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,?,?)""",
+                  (user_id,email,names[demo_role],password_hash,demo_role,dept_id,group,now(),now()))
+                user_ids[demo_role] = user_id
+            seed_demo_group(db,group,user_ids)
+            token,csrf,expires = make_session(db,user_ids[role],3600)
+            row = db.execute("""SELECT u.id,u.email,u.display_name,u.role,u.active,u.department_id,
+              u.is_demo,u.demo_group,d.name AS department_name,u.created_at
+              FROM users u LEFT JOIN departments d ON d.id=u.department_id
+              WHERE u.id=?""",(user_ids[role],)).fetchone()
+            record_audit(db,user_ids[role],"demo_session_started","demo",group,{"role":role})
+            payload = {"user":user_payload(row,db),"csrf_token":csrf,"expires_at":expires}
+        for old_path in expired_paths:
+            try:
+                old_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return json_response(self,payload,headers=self.cookie_headers(token))
 
     def auth_request(self,path,data):
         if path.endswith("/register"):
@@ -1332,6 +1714,11 @@ class Handler(BaseHTTPRequestHandler):
         params = []
         clauses = []
         role = user["role"]
+        if user.get("is_demo"):
+            clauses.append("demo_group=? AND synthetic=1")
+            params.append(user["demo_group"])
+        else:
+            clauses.append("demo_group IS NULL AND synthetic=0")
         if role == "citizen":
             clauses.append("owner_id=?")
             params.append(user["id"])
@@ -1385,8 +1772,16 @@ class Handler(BaseHTTPRequestHandler):
             rows = db.execute(sql,params).fetchall()
             reports = []
             for row in rows:
-                item = report_for_user(row,user)
+                item = report_for_user(row,user,db)
                 item.update(report_history(db,row["id"]))
+                item["notifications"] = [dict(note) for note in db.execute("""SELECT title,message,created_at,read_at
+                  FROM notifications WHERE report_id=? AND user_id=? ORDER BY created_at DESC LIMIT 3""",
+                  (row["id"],user["id"])).fetchall()]
+                if user["role"] == "citizen":
+                    feedback = db.execute("""SELECT rating,comment,created_at FROM citizen_feedback
+                      WHERE report_id=? AND owner_id=?""",(row["id"],user["id"])).fetchone()
+                    item["feedback"] = dict(feedback) if feedback else None
+                    item["feedback_open"] = row["status"] == "verified" and feedback is None
                 reports.append(item)
             return json_response(self,{"reports":reports})
 
@@ -1435,22 +1830,36 @@ class Handler(BaseHTTPRequestHandler):
             if not selected:
                 raise ValueError("Choose a valid category and subcategory.")
             route = department_from_db(db,group,subcategory)
+            cleaned.update({"title":str(data.get("title","")).strip(),
+                            "description":str(data.get("description","")).strip(),
+                            "area":str(data.get("area","")).strip(),
+                            "address":str(data.get("address","")).strip(),
+                            "category":group,"subcategory":subcategory,
+                            "latitude":latitude,"longitude":longitude,
+                            "demo_group":user.get("demo_group") if user.get("is_demo") else None})
+            possible = find_duplicate(db,cleaned)
+            if possible[0] and data.get("duplicate_acknowledged") is not True:
+                return json_response(self,{"error":"A similar unresolved report may already exist.",
+                  "duplicate_warning":{"reason":possible[1],"status":possible[3],
+                                       "text_similarity":possible[2]},"requires_confirmation":True},409)
             rid = "NG-" + uuid.uuid4().hex[:12].upper()
             cleaned.update({"id":rid,"category":group,"subcategory":subcategory,
                             "suggested_department":route,"before_photo":"pending",
-                            "owner_id":user["id"],"latitude":latitude,"longitude":longitude})
+                            "owner_id":user["id"],"synthetic":bool(user.get("is_demo"))})
             events = [event(user["display_name"],"Report submitted","Citizen-submitted report")]
-            rid,master,reason = insert_report(db,cleaned,events=events)
+            rid,master,reason,match_info = insert_report(db,cleaned,events=events)
             evidence_id = save_evidence_bytes(db,rid,"before",user["id"],payload,media_type)
             db.execute("UPDATE reports SET before_photo=? WHERE id=?",(f"evidence:{evidence_id}",rid))
             notify_roles(db,ADMIN_ROLES,rid,"report_submitted","New civic complaint",
-                         f"{rid} is awaiting municipal review.")
+                         f"{rid} is awaiting municipal review.",
+                         demo_group=user.get("demo_group") if user.get("is_demo") else None)
             record_audit(db,user["id"],"report_submitted","report",rid,{"category":group})
             row = db.execute("SELECT * FROM reports WHERE id=?",(rid,)).fetchone()
-            response = {"report":report_for_user(row,user),
+            response = {"report":report_for_user(row,user,db),
               "recommendation":{"department":route,
                 "explanation":"Suggested from the configured category route. Human review is required."},
-              "duplicate":{"master_id":master,"reason":reason} if master else None}
+              "duplicate":{"reason":reason,"match":match_info,
+                           "note":"This is a separate complaint record; no reports were merged."} if master else None}
         return json_response(self,response,201)
 
     def transition(self,user,rid,data):
@@ -1471,7 +1880,7 @@ class Handler(BaseHTTPRequestHandler):
                 department_row = db.execute("SELECT id,name FROM departments WHERE name=? AND active=1",
                                             (department,)).fetchone() if department else None
                 worker_id = data.get("worker_id")
-                worker = db.execute("""SELECT id,display_name,department_id FROM users
+                worker = db.execute("""SELECT id,display_name,department_id,is_demo,demo_group FROM users
                   WHERE id=? AND role='field_worker' AND active=1""",(worker_id,)).fetchone() if isinstance(worker_id,str) else None
                 if not department_row or not worker:
                     raise ValueError("Select an active department and field worker.")
@@ -1479,6 +1888,11 @@ class Handler(BaseHTTPRequestHandler):
                     return json_response(self,{"error":"You can assign work only within your authorized department."},403)
                 if worker["department_id"] != department_row["id"]:
                     return json_response(self,{"error":"The selected field worker is not assigned to this department."},403)
+                if r.get("demo_group"):
+                    if not worker["is_demo"] or worker["demo_group"] != r["demo_group"]:
+                        return json_response(self,{"error":"Demo work can only be assigned to a worker in the same isolated demo."},403)
+                elif worker["is_demo"]:
+                    return json_response(self,{"error":"Ordinary work cannot be assigned to a demo account."},403)
                 crew = worker["display_name"]
                 events.append(event(user["display_name"],"Work order assigned",f"{department} • {crew}"))
                 db.execute("""UPDATE reports SET department=?,crew=?,assigned_to=?,status='assigned',
@@ -1518,8 +1932,10 @@ class Handler(BaseHTTPRequestHandler):
                 db.execute("""INSERT INTO repair_submissions(id,report_id,worker_id,repair_note,evidence_id,created_at)
                   VALUES (?,?,?,?,?,?)""",(uuid.uuid4().hex,rid,user["id"],note,evidence_id,stamp))
                 notify_user(db,r["owner_id"],rid,"repair_submitted","Repair ready for inspection",f"Repair evidence for {rid} is awaiting review.")
-                notify_roles(db,{"inspector"},rid,"inspection_needed","Inspection needed",f"{rid} is ready for inspection.")
-                notify_roles(db,{"municipal_admin"},rid,"repair_submitted","Repair evidence submitted",f"{rid} is awaiting inspection.")
+                notify_roles(db,{"inspector"},rid,"inspection_needed","Inspection needed",
+                             f"{rid} is ready for inspection.",demo_group=r.get("demo_group"))
+                notify_roles(db,{"municipal_admin"},rid,"repair_submitted","Repair evidence submitted",
+                             f"{rid} is awaiting inspection.",demo_group=r.get("demo_group"))
                 record_audit(db,user["id"],"repair_submitted","report",rid)
             elif action == "verify":
                 if user["role"] != "inspector":
@@ -1560,7 +1976,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 raise ValueError("Choose a supported workflow action.")
             updated = db.execute("SELECT * FROM reports WHERE id=?",(rid,)).fetchone()
-            return json_response(self,{"report":report_for_user(updated,user)})
+            return json_response(self,{"report":report_for_user(updated,user,db)})
 
     def admin_create_user(self,user,data):
         role = data.get("role")
@@ -1578,7 +1994,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def admin_update_user(self,user,user_id,data):
         with db_session() as db:
-            target = db.execute("SELECT * FROM users WHERE id=?",(user_id,)).fetchone()
+            target = db.execute("SELECT * FROM users WHERE id=? AND is_demo=0",(user_id,)).fetchone()
             if not target:
                 return json_response(self,{"error":"User not found."},404)
             role = data.get("role",target["role"])
